@@ -15,6 +15,7 @@ import RNBluetoothClassic from "react-native-bluetooth-classic";
 export default function BluetoothScreen({ navigation }) {
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
+  const [receiving, setReceiving] = useState(false);
 
   const requestPermissions = async () => {
     if (Platform.OS !== "android") return true;
@@ -40,6 +41,42 @@ export default function BluetoothScreen({ navigation }) {
     }
   };
 
+  const enableBluetooth = async () => {
+    const enabled = await RNBluetoothClassic.isBluetoothEnabled();
+
+    if (!enabled) {
+      await RNBluetoothClassic.requestBluetoothEnabled();
+    }
+  };
+
+  const startReceiveMode = async () => {
+    try {
+      const hasPermission = await requestPermissions();
+
+      if (!hasPermission) {
+        Alert.alert(
+          "Permission Required",
+          "App Info > Permissions > Nearby devices ko Allow karo."
+        );
+        return;
+      }
+
+      await enableBluetooth();
+
+      setReceiving(true);
+
+      Alert.alert(
+        "Receive Mode Started",
+        "Ab dusre phone se Scan & Connect karo."
+      );
+
+      // TODO: Yaha real Bluetooth server/listen code add hoga.
+    } catch (error) {
+      setReceiving(false);
+      Alert.alert("Receive Error", String(error?.message || error));
+    }
+  };
+
   const startScan = async () => {
     try {
       const hasPermission = await requestPermissions();
@@ -52,11 +89,7 @@ export default function BluetoothScreen({ navigation }) {
         return;
       }
 
-      const enabled = await RNBluetoothClassic.isBluetoothEnabled();
-
-      if (!enabled) {
-        await RNBluetoothClassic.requestBluetoothEnabled();
-      }
+      await enableBluetooth();
 
       setScanning(true);
 
@@ -71,10 +104,10 @@ export default function BluetoothScreen({ navigation }) {
       );
 
       setDevices(uniqueDevices);
-      setScanning(false);
     } catch (error) {
-      setScanning(false);
       Alert.alert("Bluetooth Error", String(error?.message || error));
+    } finally {
+      setScanning(false);
     }
   };
 
@@ -84,7 +117,6 @@ export default function BluetoothScreen({ navigation }) {
 
       if (connected) {
         navigation.navigate("ChatScreen", {
-          device: device,
           deviceName: device.name || "Device",
           deviceAddress: device.address,
         });
@@ -103,8 +135,8 @@ export default function BluetoothScreen({ navigation }) {
         <Text style={styles.address}>{item.address || "No address"}</Text>
       </View>
 
-      <TouchableOpacity style={styles.btn} onPress={() => connectDevice(item)}>
-        <Text style={styles.btnText}>Connect</Text>
+      <TouchableOpacity style={styles.connectBtn} onPress={() => connectDevice(item)}>
+        <Text style={styles.connectText}>Connect</Text>
       </TouchableOpacity>
     </View>
   );
@@ -114,12 +146,22 @@ export default function BluetoothScreen({ navigation }) {
       <Text style={styles.title}>Bluetooth Mesh</Text>
 
       <TouchableOpacity
+        style={[styles.receiveBtn, receiving && styles.disabledBtn]}
+        onPress={startReceiveMode}
+        disabled={receiving}
+      >
+        <Text style={styles.mainBtnText}>
+          {receiving ? "Receive Mode Active" : "Start Receive Mode"}
+        </Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
         style={[styles.scanBtn, scanning && styles.disabledBtn]}
         onPress={startScan}
         disabled={scanning}
       >
-        <Text style={styles.scanText}>
-          {scanning ? "Scanning..." : "Start Bluetooth Scan"}
+        <Text style={styles.mainBtnText}>
+          {scanning ? "Scanning..." : "Scan & Connect"}
         </Text>
       </TouchableOpacity>
 
@@ -148,19 +190,27 @@ const styles = StyleSheet.create({
     marginTop: 45,
     marginBottom: 20,
   },
+  receiveBtn: {
+    backgroundColor: "#00C853",
+    paddingVertical: 16,
+    borderRadius: 30,
+    alignItems: "center",
+    marginBottom: 14,
+  },
   scanBtn: {
     backgroundColor: "#00E676",
-    padding: 14,
-    borderRadius: 25,
+    paddingVertical: 16,
+    borderRadius: 30,
     alignItems: "center",
     marginBottom: 20,
   },
+  mainBtnText: {
+    color: "#03120A",
+    fontSize: 17,
+    fontWeight: "800",
+  },
   disabledBtn: {
     opacity: 0.6,
-  },
-  scanText: {
-    color: "#04110A",
-    fontWeight: "800",
   },
   card: {
     backgroundColor: "#0B1622",
@@ -181,13 +231,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
-  btn: {
+  connectBtn: {
     backgroundColor: "#122D22",
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 20,
   },
-  btnText: {
+  connectText: {
     color: "#00E676",
     fontWeight: "700",
   },

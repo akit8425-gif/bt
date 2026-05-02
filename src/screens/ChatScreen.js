@@ -43,6 +43,9 @@ export default function ChatScreen({ route, navigation }) {
           <Text style={styles.back}>‹</Text>
         </TouchableOpacity>
 
+  
+   
+
         <View style={styles.profileIcon}>
           <Text style={styles.profileText}>👤</Text>
         </View>
@@ -87,6 +90,26 @@ const styles = StyleSheet.create({
     backgroundColor: "#050B12",
     padding: 16,
   },
+  receiveBtn: {
+  backgroundColor: "#00C853",
+  paddingVertical: 16,
+  borderRadius: 30,
+  alignItems: "center",
+  marginBottom: 14,
+},
+
+scanBtn: {
+  backgroundColor: "#00E676",
+  paddingVertical: 16,
+  borderRadius: 30,
+  alignItems: "center",
+},
+
+btnText: {
+  color: "#03120A",
+  fontSize: 17,
+  fontWeight: "800",
+},
   header: {
     marginTop: 42,
     backgroundColor: "#0B1622",
