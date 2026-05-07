@@ -8,6 +8,7 @@ import {
   PermissionsAndroid,
   Platform,
   Alert,
+  ScrollView,
   TextInput,
 } from "react-native";
 
@@ -18,18 +19,16 @@ export default function ChatScreen() {
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState(null);
-  const [connectedDevices, setConnectedDevices] = useState([]);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
 
-  const subscriptionsRef = useRef({});
-  const seenMessagesRef = useRef(new Set());
+  const subscriptionRef = useRef(null);
 
   useEffect(() => {
     return () => {
-      Object.values(subscriptionsRef.current).forEach(sub => {
-        if (sub?.remove) sub.remove();
-      });
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
+      }
     };
   }, []);
 
@@ -62,7 +61,10 @@ export default function ChatScreen() {
       const hasPermission = await requestPermissions();
 
       if (!hasPermission) {
-        Alert.alert("Permission Required", "Bluetooth aur Location permission allow karo");
+        Alert.alert(
+          "Permission Required",
+          "Bluetooth aur Location permission allow karo"
+        );
         return;
       }
 
@@ -92,75 +94,25 @@ export default function ChatScreen() {
     }
   };
 
-  const forwardRelayMessage = async (packet, senderAddress) => {
-    if (packet.ttl <= 0) return;
-
-    const nextPacket = {
-      ...packet,
-      ttl: packet.ttl - 1,
-    };
-
-    for (const device of connectedDevices) {
-      if (device.address === senderAddress) continue;
-
-      try {
-        const isConnected = await device.isConnected();
-
-        if (isConnected) {
-          await device.write(JSON.stringify(nextPacket) + "\n");
-        }
-      } catch (error) {
-        console.log("Relay forward error:", error);
-      }
-    }
-  };
-
-  const handleIncomingMessage = async (rawMessage, senderDevice) => {
-    try {
-      const packet = JSON.parse(rawMessage);
-
-      if (!packet.id || !packet.text) return;
-
-      if (seenMessagesRef.current.has(packet.id)) {
-        return;
-      }
-
-      seenMessagesRef.current.add(packet.id);
-
-      setChat(prev => [
-        ...prev,
-        {
-          id: packet.id,
-          text: `[RELAY FROM ${packet.from || "Unknown"}] ${packet.text}`,
-          type: "received",
-        },
-      ]);
-
-      await forwardRelayMessage(packet, senderDevice.address);
-    } catch (error) {
-      setChat(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          text: rawMessage,
-          type: "received",
-        },
-      ]);
-    }
-  };
-
   const startReadingMessages = device => {
     try {
-      if (subscriptionsRef.current[device.address]) {
-        subscriptionsRef.current[device.address].remove();
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
       }
 
-      subscriptionsRef.current[device.address] = device.onDataReceived(data => {
+      subscriptionRef.current = device.onDataReceived(data => {
         const receivedMessage = data?.data?.trim();
 
         if (!receivedMessage) return;
 
-        handleIncomingMessage(receivedMessage, device);
+        setChat(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            text: receivedMessage,
+            type: "received",
+          },
+        ]);
       });
     } catch (error) {
       console.log("Read Error:", error);
@@ -176,16 +128,12 @@ export default function ChatScreen() {
 
       if (connected) {
         setConnectedDevice(device);
-
-        setConnectedDevices(prev => {
-          const exists = prev.find(d => d.address === device.address);
-          if (exists) return prev;
-          return [...prev, device];
-        });
-
         startReadingMessages(device);
 
-        Alert.alert("Connected", `${device.name || "Device"} connected successfully`);
+        Alert.alert(
+          "Connected",
+          `${device.name || "Device"} connected successfully`
+        );
       } else {
         Alert.alert("Failed", "Device connect nahi hua");
       }
@@ -194,7 +142,7 @@ export default function ChatScreen() {
     }
   };
 
-  const sendSingleMessage = async () => {
+  const sendMessage = async () => {
     if (!connectedDevice) {
       Alert.alert("No Device", "Pehle device connect karo");
       return;
@@ -203,22 +151,15 @@ export default function ChatScreen() {
     if (!message.trim()) return;
 
     try {
-      const packet = {
-        id: `${Date.now()}-${Math.random()}`,
-        from: "Me",
-        text: message.trim(),
-        ttl: 0,
-      };
+      const shortMessage = message.trim();
 
-      seenMessagesRef.current.add(packet.id);
-
-      await connectedDevice.write(JSON.stringify(packet) + "\n");
+      await connectedDevice.write(shortMessage + "\n");
 
       setChat(prev => [
         ...prev,
         {
-          id: packet.id,
-          text: `[SINGLE] ${packet.text}`,
+          id: Date.now().toString(),
+          text: shortMessage,
           type: "sent",
         },
       ]);
@@ -229,49 +170,8 @@ export default function ChatScreen() {
     }
   };
 
-  const sendRelayMessage = async () => {
-    if (connectedDevices.length === 0) {
-      Alert.alert("No Devices", "Pehle devices connect karo");
-      return;
-    }
-
-    if (!message.trim()) return;
-
-    const packet = {
-      id: `${Date.now()}-${Math.random()}`,
-      from: "Me",
-      text: message.trim(),
-      ttl: 3,
-    };
-
-    seenMessagesRef.current.add(packet.id);
-
-    for (const device of connectedDevices) {
-      try {
-        const isConnected = await device.isConnected();
-
-        if (isConnected) {
-          await device.write(JSON.stringify(packet) + "\n");
-        }
-      } catch (error) {
-        console.log("Relay send error:", error);
-      }
-    }
-
-    setChat(prev => [
-      ...prev,
-      {
-        id: packet.id,
-        text: `[RELAY SENT] ${packet.text}`,
-        type: "sent",
-      },
-    ]);
-
-    setMessage("");
-  };
-
   const sendSOSMessage = async () => {
-    if (connectedDevices.length === 0 && !connectedDevice) {
+    if (!connectedDevice) {
       Alert.alert("No Device", "Pehle Bluetooth device connect karo");
       return;
     }
@@ -282,43 +182,41 @@ export default function ChatScreen() {
         timeout: 10000,
       });
 
-      const sosText = `SOS ALERT | Help needed under 100 Meter | Lat:${location.latitude} | Lng:${location.longitude}`;
+      const sosMessage = `SOS ALERT | Help needed under 100 Meter | Lat:${location.latitude} | Lng:${location.longitude}`;
 
-      const packet = {
-        id: `${Date.now()}-${Math.random()}`,
-        from: "Me",
-        text: sosText,
-        ttl: 3,
-      };
-
-      seenMessagesRef.current.add(packet.id);
-
-      const targets = connectedDevices.length > 0 ? connectedDevices : [connectedDevice];
-
-      for (const device of targets) {
-        try {
-          const isConnected = await device.isConnected();
-          if (isConnected) {
-            await device.write(JSON.stringify(packet) + "\n");
-          }
-        } catch (error) {
-          console.log("SOS relay send error:", error);
-        }
-      }
+      await connectedDevice.write(sosMessage + "\n");
 
       setChat(prev => [
         ...prev,
         {
-          id: packet.id,
-          text: `[SOS RELAY] ${sosText}`,
+          id: Date.now().toString(),
+          text: sosMessage,
           type: "sent",
         },
       ]);
 
-      Alert.alert("SOS Sent", "SOS relay message send ho gaya");
+      Alert.alert("SOS Sent", "Emergency message successfully send ho gaya");
     } catch (error) {
-      Alert.alert("Location Error", "GPS ON karo aur location permission allow karo.");
       console.log("SOS Error:", error);
+
+      const fallbackMessage = "SOS ALERT | Help needed | Location unavailable";
+
+      try {
+        await connectedDevice.write(fallbackMessage + "\n");
+
+        setChat(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            text: fallbackMessage,
+            type: "sent",
+          },
+        ]);
+
+        Alert.alert("SOS Sent", "Location ke bina SOS send ho gaya");
+      } catch (sendError) {
+        Alert.alert("Send Error", String(sendError?.message || sendError));
+      }
     }
   };
 
@@ -326,10 +224,14 @@ export default function ChatScreen() {
     <View style={styles.card}>
       <View style={{ flex: 1 }}>
         <Text style={styles.name}>{item.name || "Unknown Device"}</Text>
+
         <Text style={styles.address}>{item.address || "No Address"}</Text>
       </View>
 
-      <TouchableOpacity style={styles.connectBtn} onPress={() => connectDevice(item)}>
+      <TouchableOpacity
+        style={styles.connectBtn}
+        onPress={() => connectDevice(item)}
+      >
         <Text style={styles.connectText}>Connect</Text>
       </TouchableOpacity>
     </View>
@@ -337,7 +239,7 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Bluetooth Mesh Relay</Text>
+      <Text style={styles.title}>Bluetooth Mesh Chat</Text>
 
       <TouchableOpacity
         style={[styles.scanBtn, scanning && styles.disabledBtn]}
@@ -354,23 +256,21 @@ export default function ChatScreen() {
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
         ListEmptyComponent={
-          <Text style={styles.empty}>Scan karo, nearby devices yaha show honge.</Text>
+          <Text style={styles.empty}>
+            Scan karo, nearby devices yaha show honge.
+          </Text>
         }
       />
 
       <TouchableOpacity style={styles.sosBtn} onPress={sendSOSMessage}>
-        <Text style={styles.sosText}>🚨 SEND SOS RELAY</Text>
+        <Text style={styles.sosText}>🚨 SEND SOS ALERT</Text>
       </TouchableOpacity>
 
       <View style={styles.chatBox}>
         <Text style={styles.connectedText}>
           {connectedDevice
-            ? `Selected: ${connectedDevice.name || "Device"}`
-            : "No device selected"}
-        </Text>
-
-        <Text style={styles.connectedCount}>
-          Connected Devices: {connectedDevices.length}
+            ? `Connected: ${connectedDevice.name || "Device"}`
+            : "No device connected"}
         </Text>
 
         <FlatList
@@ -403,15 +303,9 @@ export default function ChatScreen() {
             value={message}
             onChangeText={setMessage}
           />
-        </View>
 
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.sendBtn} onPress={sendSingleMessage}>
+          <TouchableOpacity style={styles.sendBtn} onPress={sendMessage}>
             <Text style={styles.sendText}>Send</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.relayBtn} onPress={sendRelayMessage}>
-            <Text style={styles.sendText}>Relay</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -425,6 +319,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#050B12",
     padding: 20,
   },
+
   title: {
     color: "#fff",
     fontSize: 26,
@@ -432,6 +327,7 @@ const styles = StyleSheet.create({
     marginTop: 45,
     marginBottom: 20,
   },
+
   scanBtn: {
     backgroundColor: "#00E676",
     padding: 14,
@@ -439,13 +335,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 20,
   },
+
   disabledBtn: {
     opacity: 0.6,
   },
+
   scanText: {
     color: "#04110A",
     fontWeight: "900",
   },
+
   sosBtn: {
     backgroundColor: "#EF4444",
     padding: 14,
@@ -453,11 +352,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 14,
   },
+
   sosText: {
     color: "#fff",
     fontWeight: "900",
     fontSize: 15,
   },
+
   card: {
     backgroundColor: "#0B1622",
     borderRadius: 15,
@@ -467,47 +368,50 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+
   name: {
     color: "#fff",
     fontSize: 16,
     fontWeight: "700",
   },
+
   address: {
     color: "#8C95A1",
     marginTop: 4,
     fontSize: 12,
   },
+
   connectBtn: {
     backgroundColor: "#122D22",
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 20,
   },
+
   connectText: {
     color: "#00E676",
     fontWeight: "800",
   },
+
   empty: {
     color: "#8C95A1",
     textAlign: "center",
     marginTop: 25,
   },
+
   chatBox: {
     backgroundColor: "#0B1622",
     borderRadius: 18,
     padding: 12,
-    maxHeight: 360,
+    maxHeight: 320,
   },
+
   connectedText: {
     color: "#00E676",
     fontWeight: "700",
-    marginBottom: 5,
-  },
-  connectedCount: {
-    color: "#8C95A1",
     marginBottom: 10,
-    fontSize: 12,
   },
+
   messageBubble: {
     alignSelf: "flex-end",
     backgroundColor: "#00E676",
@@ -516,22 +420,27 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     maxWidth: "80%",
   },
+
   receivedBubble: {
     alignSelf: "flex-start",
     backgroundColor: "#1E293B",
   },
+
   messageText: {
     color: "#04110A",
     fontWeight: "700",
   },
+
   receivedText: {
     color: "#fff",
   },
+
   inputRow: {
     flexDirection: "row",
     alignItems: "center",
     marginTop: 10,
   },
+
   input: {
     flex: 1,
     backgroundColor: "#050B12",
@@ -539,26 +448,16 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     paddingHorizontal: 14,
     paddingVertical: 10,
+    marginRight: 8,
   },
-  buttonRow: {
-    flexDirection: "row",
-    marginTop: 10,
-    gap: 10,
-  },
+
   sendBtn: {
-    flex: 1,
     backgroundColor: "#00E676",
+    paddingHorizontal: 18,
     paddingVertical: 11,
     borderRadius: 22,
-    alignItems: "center",
   },
-  relayBtn: {
-    flex: 1,
-    backgroundColor: "#3B82F6",
-    paddingVertical: 11,
-    borderRadius: 22,
-    alignItems: "center",
-  },
+
   sendText: {
     color: "#04110A",
     fontWeight: "900",

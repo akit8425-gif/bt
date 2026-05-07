@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -8,14 +8,28 @@ import {
   PermissionsAndroid,
   Platform,
   Alert,
+  TextInput,
 } from "react-native";
 
 import RNBluetoothClassic from "react-native-bluetooth-classic";
+import GetLocation from "react-native-get-location";
 
 export default function BluetoothScreen({ navigation }) {
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
-  const [receiving, setReceiving] = useState(false);
+  const [connectedDevice, setConnectedDevice] = useState(null);
+  const [message, setMessage] = useState("");
+  const [chat, setChat] = useState([]);
+
+  const subscriptionRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
+      }
+    };
+  }, []);
 
   const requestPermissions = async () => {
     if (Platform.OS !== "android") return true;
@@ -41,42 +55,6 @@ export default function BluetoothScreen({ navigation }) {
     }
   };
 
-  const enableBluetooth = async () => {
-    const enabled = await RNBluetoothClassic.isBluetoothEnabled();
-
-    if (!enabled) {
-      await RNBluetoothClassic.requestBluetoothEnabled();
-    }
-  };
-
-  const startReceiveMode = async () => {
-    try {
-      const hasPermission = await requestPermissions();
-
-      if (!hasPermission) {
-        Alert.alert(
-          "Permission Required",
-          "App Info > Permissions > Nearby devices ko Allow karo."
-        );
-        return;
-      }
-
-      await enableBluetooth();
-
-      setReceiving(true);
-
-      Alert.alert(
-        "Receive Mode Started",
-        "Ab dusre phone se Scan & Connect karo."
-      );
-
-      // TODO: Yaha real Bluetooth server/listen code add hoga.
-    } catch (error) {
-      setReceiving(false);
-      Alert.alert("Receive Error", String(error?.message || error));
-    }
-  };
-
   const startScan = async () => {
     try {
       const hasPermission = await requestPermissions();
@@ -84,12 +62,16 @@ export default function BluetoothScreen({ navigation }) {
       if (!hasPermission) {
         Alert.alert(
           "Permission Required",
-          "App Info > Permissions > Nearby devices ko Allow karo."
+          "Allow necessary permissions to scan for Bluetooth/Location devices."
         );
         return;
       }
 
-      await enableBluetooth();
+      const enabled = await RNBluetoothClassic.isBluetoothEnabled();
+
+      if (!enabled) {
+        await RNBluetoothClassic.requestBluetoothEnabled();
+      }
 
       setScanning(true);
 
@@ -104,27 +86,135 @@ export default function BluetoothScreen({ navigation }) {
       );
 
       setDevices(uniqueDevices);
-    } catch (error) {
-      Alert.alert("Bluetooth Error", String(error?.message || error));
-    } finally {
       setScanning(false);
+    } catch (error) {
+      setScanning(false);
+      Alert.alert("Bluetooth Error", String(error?.message || error));
+    }
+  };
+
+  const startReadingMessages = device => {
+    try {
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
+      }
+
+      subscriptionRef.current = device.onDataReceived(data => {
+        const receivedMessage = data?.data?.trim();
+
+        if (!receivedMessage) return;
+
+        setChat(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            text: receivedMessage,
+            type: "received",
+          },
+        ]);
+      });
+    } catch (error) {
+      console.log("Read error:", error);
     }
   };
 
   const connectDevice = async device => {
     try {
-      const connected = await device.connect();
+      const connected = await device.connect({
+        delimiter: "\n",
+      });
 
       if (connected) {
-        navigation.navigate("ChatScreen", {
-          deviceName: device.name || "Device",
-          deviceAddress: device.address,
-        });
-      } else {
-        Alert.alert("Failed", "Device connect nahi hua");
+        setConnectedDevice(device);
+        startReadingMessages(device);
       }
+
+      Alert.alert(
+        connected ? "Connected" : "Failed",
+        connected
+          ? `${device.name || "Device"} connected`
+          : " Device not connected"
+      );
     } catch (error) {
       Alert.alert("Connect Error", String(error?.message || error));
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!connectedDevice) {
+      Alert.alert("No Device", "Connect device first");
+      return;
+    }
+
+    if (!message.trim()) return;
+
+    try {
+      await connectedDevice.write(message.trim() + "\n");
+
+      setChat(prev => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          text: message.trim(),
+          type: "sent",
+        },
+      ]);
+
+      setMessage("");
+    } catch (error) {
+      Alert.alert("Send Error", String(error?.message || error));
+    }
+  };
+
+  const sendSOSMessage = async () => {
+    if (!connectedDevice) {
+      Alert.alert("No Device", "Connect Bluetooth device first");
+      return;
+    }
+
+    try {
+      const location = await GetLocation.getCurrentPosition({
+        enableHighAccuracy: true,
+        timeout: 15000,
+      });
+
+      const sosMessage = `
+🚨 SOS EMERGENCY 🚨
+
+Mera naam Abhishek hai.
+Mujhe turant help chahiye.
+
+📍 Offline Current Location:
+Latitude: ${location.latitude}
+Longitude: ${location.longitude}
+
+⚠ Internet available nahi hai.
+Bluetooth Mesh Emergency Alert.
+`;
+
+      await connectedDevice.write(sosMessage + "\n");
+
+      setChat(prev => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          text: sosMessage,
+          type: "sent",
+        },
+      ]);
+
+      navigation.navigate("ChatScreen", {
+        connectedDevice,
+        sosMessage,
+        latitude: location.latitude,
+        longitude: location.longitude,
+      });
+    } catch (error) {
+      Alert.alert(
+        "Location Error",
+        "Turn on GPS and allow location permission."
+      );
+      console.log(error);
     }
   };
 
@@ -135,8 +225,8 @@ export default function BluetoothScreen({ navigation }) {
         <Text style={styles.address}>{item.address || "No address"}</Text>
       </View>
 
-      <TouchableOpacity style={styles.connectBtn} onPress={() => connectDevice(item)}>
-        <Text style={styles.connectText}>Connect</Text>
+      <TouchableOpacity style={styles.btn} onPress={() => connectDevice(item)}>
+        <Text style={styles.btnText}>Connect</Text>
       </TouchableOpacity>
     </View>
   );
@@ -146,22 +236,12 @@ export default function BluetoothScreen({ navigation }) {
       <Text style={styles.title}>Bluetooth Mesh</Text>
 
       <TouchableOpacity
-        style={[styles.receiveBtn, receiving && styles.disabledBtn]}
-        onPress={startReceiveMode}
-        disabled={receiving}
-      >
-        <Text style={styles.mainBtnText}>
-          {receiving ? "Receive Mode Active" : "Start Receive Mode"}
-        </Text>
-      </TouchableOpacity>
-
-      <TouchableOpacity
         style={[styles.scanBtn, scanning && styles.disabledBtn]}
         onPress={startScan}
         disabled={scanning}
       >
-        <Text style={styles.mainBtnText}>
-          {scanning ? "Scanning..." : "Scan & Connect"}
+        <Text style={styles.scanText}>
+          {scanning ? "Scanning..." : "Start Bluetooth Scan"}
         </Text>
       </TouchableOpacity>
 
@@ -170,9 +250,59 @@ export default function BluetoothScreen({ navigation }) {
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
         ListEmptyComponent={
-          <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+          <Text style={styles.empty}>
+Scan, Devices will be showing here.
+          </Text>
         }
       />
+
+      <TouchableOpacity style={styles.sosBtn} onPress={sendSOSMessage}>
+        <Text style={styles.sosText}>🚨 SOS / Send Offline Location</Text>
+      </TouchableOpacity>
+
+      <View style={styles.chatBox}>
+        <Text style={styles.connectedText}>
+          {connectedDevice
+            ? `Connected: ${connectedDevice.name || "Device"}`
+            : "No device connected"}
+        </Text>
+
+        <FlatList
+          data={chat}
+          keyExtractor={item => item.id}
+          renderItem={({ item }) => (
+            <View
+              style={[
+                styles.messageBubble,
+                item.type === "received" && styles.receivedBubble,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.messageText,
+                  item.type === "received" && styles.receivedText,
+                ]}
+              >
+                {item.text}
+              </Text>
+            </View>
+          )}
+        />
+
+        <View style={styles.inputRow}>
+          <TextInput
+            style={styles.input}
+            placeholder="Type message..."
+            placeholderTextColor="#8C95A1"
+            value={message}
+            onChangeText={setMessage}
+          />
+
+          <TouchableOpacity style={styles.sendBtn} onPress={sendMessage}>
+            <Text style={styles.sendText}>Send</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
     </View>
   );
 }
@@ -190,27 +320,32 @@ const styles = StyleSheet.create({
     marginTop: 45,
     marginBottom: 20,
   },
-  receiveBtn: {
-    backgroundColor: "#00C853",
-    paddingVertical: 16,
-    borderRadius: 30,
-    alignItems: "center",
-    marginBottom: 14,
-  },
   scanBtn: {
     backgroundColor: "#00E676",
-    paddingVertical: 16,
-    borderRadius: 30,
+    padding: 14,
+    borderRadius: 25,
     alignItems: "center",
     marginBottom: 20,
   },
-  mainBtnText: {
-    color: "#03120A",
-    fontSize: 17,
-    fontWeight: "800",
-  },
   disabledBtn: {
     opacity: 0.6,
+  },
+  scanText: {
+    color: "#04110A",
+    fontWeight: "800",
+  },
+  sosBtn: {
+    backgroundColor: "#EF4444",
+    padding: 14,
+    borderRadius: 25,
+    alignItems: "center",
+    marginBottom: 12,
+    marginTop: 5,
+  },
+  sosText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 15,
   },
   card: {
     backgroundColor: "#0B1622",
@@ -231,13 +366,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
   },
-  connectBtn: {
+  btn: {
     backgroundColor: "#122D22",
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 20,
   },
-  connectText: {
+  btnText: {
     color: "#00E676",
     fontWeight: "700",
   },
@@ -245,5 +380,59 @@ const styles = StyleSheet.create({
     color: "#8C95A1",
     textAlign: "center",
     marginTop: 30,
+  },
+  chatBox: {
+    backgroundColor: "#0B1622",
+    borderRadius: 16,
+    padding: 12,
+    maxHeight: 280,
+  },
+  connectedText: {
+    color: "#00E676",
+    fontWeight: "700",
+    marginBottom: 10,
+  },
+  messageBubble: {
+    alignSelf: "flex-end",
+    backgroundColor: "#00E676",
+    padding: 10,
+    borderRadius: 14,
+    marginBottom: 8,
+    maxWidth: "80%",
+  },
+  receivedBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: "#1E293B",
+  },
+  messageText: {
+    color: "#04110A",
+    fontWeight: "600",
+  },
+  receivedText: {
+    color: "#fff",
+  },
+  inputRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 10,
+  },
+  input: {
+    flex: 1,
+    backgroundColor: "#050B12",
+    color: "#fff",
+    borderRadius: 22,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginRight: 8,
+  },
+  sendBtn: {
+    backgroundColor: "#00E676",
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderRadius: 22,
+  },
+  sendText: {
+    color: "#04110A",
+    fontWeight: "800",
   },
 });

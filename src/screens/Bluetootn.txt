@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -13,12 +13,22 @@ import {
 
 import RNBluetoothClassic from "react-native-bluetooth-classic";
 
-export default function BluetoothScreen() {
+export default function BluetoothScreen({ navigation }) {
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
+
+  const subscriptionRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
+      }
+    };
+  }, []);
 
   const requestPermissions = async () => {
     if (Platform.OS !== "android") return true;
@@ -34,8 +44,6 @@ export default function BluetoothScreen() {
           : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
       const result = await PermissionsAndroid.requestMultiple(permissions);
-
-      console.log("Permission result:", result);
 
       return permissions.every(
         permission => result[permission] === PermissionsAndroid.RESULTS.GRANTED
@@ -84,12 +92,40 @@ export default function BluetoothScreen() {
     }
   };
 
+  const startReadingMessages = device => {
+    try {
+      if (subscriptionRef.current) {
+        subscriptionRef.current.remove();
+      }
+
+      subscriptionRef.current = device.onDataReceived(data => {
+        const receivedMessage = data?.data?.trim();
+
+        if (!receivedMessage) return;
+
+        setChat(prev => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            text: receivedMessage,
+            type: "received",
+          },
+        ]);
+      });
+    } catch (error) {
+      console.log("Read error:", error);
+    }
+  };
+
   const connectDevice = async device => {
     try {
-      const connected = await device.connect();
+      const connected = await device.connect({
+        delimiter: "\n",
+      });
 
       if (connected) {
         setConnectedDevice(device);
+        startReadingMessages(device);
       }
 
       Alert.alert(
@@ -112,17 +148,28 @@ export default function BluetoothScreen() {
     if (!message.trim()) return;
 
     try {
-      await connectedDevice.write(message + "\n");
+      await connectedDevice.write(message.trim() + "\n");
 
       setChat(prev => [
         ...prev,
-        { id: Date.now().toString(), text: message, type: "sent" },
+        {
+          id: Date.now().toString(),
+          text: message.trim(),
+          type: "sent",
+        },
       ]);
 
       setMessage("");
     } catch (error) {
       Alert.alert("Send Error", String(error?.message || error));
     }
+  };
+
+  const goToChatScreen = () => {
+    navigation.navigate("ChatScreen", {
+      connectedDeviceName: connectedDevice?.name || "No Device",
+      connectedDeviceAddress: connectedDevice?.address || "",
+    });
   };
 
   const renderDevice = ({ item }) => (
@@ -161,6 +208,10 @@ export default function BluetoothScreen() {
         }
       />
 
+      <TouchableOpacity style={styles.sosBtn} onPress={goToChatScreen}>
+        <Text style={styles.sosText}>🚨 SOS / Emergency </Text>
+      </TouchableOpacity>
+
       <View style={styles.chatBox}>
         <Text style={styles.connectedText}>
           {connectedDevice
@@ -172,8 +223,20 @@ export default function BluetoothScreen() {
           data={chat}
           keyExtractor={item => item.id}
           renderItem={({ item }) => (
-            <View style={styles.messageBubble}>
-              <Text style={styles.messageText}>{item.text}</Text>
+            <View
+              style={[
+                styles.messageBubble,
+                item.type === "received" && styles.receivedBubble,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.messageText,
+                  item.type === "received" && styles.receivedText,
+                ]}
+              >
+                {item.text}
+              </Text>
             </View>
           )}
         />
@@ -223,6 +286,19 @@ const styles = StyleSheet.create({
     color: "#04110A",
     fontWeight: "800",
   },
+  sosBtn: {
+    backgroundColor: "#EF4444",
+    padding: 14,
+    borderRadius: 25,
+    alignItems: "center",
+    marginBottom: 12,
+    marginTop: 5,
+  },
+  sosText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 15,
+  },
   card: {
     backgroundColor: "#0B1622",
     borderRadius: 15,
@@ -261,7 +337,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#0B1622",
     borderRadius: 16,
     padding: 12,
-    maxHeight: 260,
+    maxHeight: 280,
   },
   connectedText: {
     color: "#00E676",
@@ -276,9 +352,16 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     maxWidth: "80%",
   },
+  receivedBubble: {
+    alignSelf: "flex-start",
+    backgroundColor: "#1E293B",
+  },
   messageText: {
     color: "#04110A",
     fontWeight: "600",
+  },
+  receivedText: {
+    color: "#fff",
   },
   inputRow: {
     flexDirection: "row",
