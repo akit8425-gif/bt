@@ -14,9 +14,13 @@ import {
 import RNBluetoothClassic from "react-native-bluetooth-classic";
 import GetLocation from "react-native-get-location";
 
+const HEARTBEAT_INTERVAL = 5000; 
+const DEAD_TIMEOUT = 35000;
+
 export default function ChatScreen() {
   const [devices, setDevices] = useState([]);
   const [scanning, setScanning] = useState(false);
+  const [receiving, setReceiving] = useState(false);
   const [connectedDevice, setConnectedDevice] = useState(null);
   const [connectedDevices, setConnectedDevices] = useState([]);
   const [message, setMessage] = useState("");
@@ -24,12 +28,23 @@ export default function ChatScreen() {
 
   const subscriptionsRef = useRef({});
   const seenMessagesRef = useRef(new Set());
+  const heartbeatRef = useRef(null);
+  const lastSeenRef = useRef({});
+  const devicesRef = useRef([]);
+
+  useEffect(() => {
+    devicesRef.current = connectedDevices;
+  }, [connectedDevices]);
 
   useEffect(() => {
     return () => {
       Object.values(subscriptionsRef.current).forEach(sub => {
         if (sub?.remove) sub.remove();
       });
+
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+      }
     };
   }, []);
 
@@ -47,40 +62,325 @@ export default function ChatScreen() {
           : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
       const result = await PermissionsAndroid.requestMultiple(permissions);
+      console.log("PERMISSION RESULT:", result);
 
       return permissions.every(
         permission => result[permission] === PermissionsAndroid.RESULTS.GRANTED
       );
     } catch (error) {
-      console.log("Permission error:", error);
+      console.log("PERMISSION ERROR:", error);
       return false;
+    }
+  };
+
+  const prepareBluetooth = async () => {
+    const hasPermission = await requestPermissions();
+
+    if (!hasPermission) {
+      Alert.alert("Permission Required", "Bluetooth aur Location permission allow karo");
+      return false;
+    }
+
+    const enabled = await RNBluetoothClassic.isBluetoothEnabled();
+    console.log("BLUETOOTH ENABLED:", enabled);
+
+    if (!enabled) {
+      await RNBluetoothClassic.requestBluetoothEnabled();
+    }
+
+    return true;
+  };
+
+  const addConnectedDevice = device => {
+    if (!device?.address) return;
+
+    lastSeenRef.current[device.address] = Date.now();
+
+    setConnectedDevice(device);
+
+    setConnectedDevices(prev => {
+      const exists = prev.find(d => d.address === device.address);
+      if (exists) return prev;
+      return [...prev, device];
+    });
+  };
+
+  const removeDeadDevice = address => {
+    console.log("REMOVING DEAD DEVICE:", address);
+
+    if (subscriptionsRef.current[address]) {
+      subscriptionsRef.current[address]?.remove?.();
+      delete subscriptionsRef.current[address];
+    }
+
+    delete lastSeenRef.current[address];
+
+    setConnectedDevices(prev => {
+      const updated = prev.filter(d => d.address !== address);
+      setConnectedDevice(updated[0] || null);
+      return updated;
+    });
+  };
+
+  const startHeartbeat = () => {
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+
+    heartbeatRef.current = setInterval(async () => {
+      const now = Date.now();
+
+      for (const device of devicesRef.current) {
+        try {
+          const isConnected = await device.isConnected();
+          const lastSeen = lastSeenRef.current[device.address] || 0;
+
+          console.log("PING CHECK:", {
+            device: device.name || device.address,
+            isConnected,
+            lastSeenAgo: now - lastSeen,
+          });
+
+          if (!isConnected || now - lastSeen > DEAD_TIMEOUT) {
+            removeDeadDevice(device.address);
+            continue;
+          }
+
+          const pingPacket = {
+            id: `ping-${Date.now()}-${Math.random()}`,
+            type: "PING",
+            from: "Me",
+            time: Date.now(),
+          };
+
+          await device.write(JSON.stringify(pingPacket) + "\n");
+          console.log("PING SENT:", device.name || device.address);
+        } catch (error) {
+          console.log("PING ERROR:", error);
+          removeDeadDevice(device.address);
+        }
+      }
+    }, HEARTBEAT_INTERVAL);
+  };
+
+  const sendToDevice = async (device, packet) => {
+    try {
+      const isConnected = await device.isConnected();
+
+      if (!isConnected) {
+        removeDeadDevice(device.address);
+        return false;
+      }
+
+      await device.write(JSON.stringify(packet) + "\n");
+      return true;
+    } catch (error) {
+      console.log("SEND TO DEVICE ERROR:", error);
+      removeDeadDevice(device.address);
+      return false;
+    }
+  };
+
+  const relayPacket = async (packet, senderAddress) => {
+    const targets = devicesRef.current.filter(
+      d => d.address !== senderAddress
+    );
+
+    if (targets.length === 0) {
+      console.log("NO RELAY TARGET FOUND");
+      return;
+    }
+
+    for (const device of targets) {
+      const ok = await sendToDevice(device, packet);
+      console.log("RELAY RESULT:", device.name || device.address, ok);
+    }
+  };
+
+  const handleIncomingMessage = async (rawMessage, senderDevice) => {
+    console.log("RAW MESSAGE RECEIVED:", rawMessage);
+
+    try {
+      const packet = JSON.parse(rawMessage);
+
+      if (senderDevice?.address) {
+        lastSeenRef.current[senderDevice.address] = Date.now();
+      }
+
+      if (packet.type === "PING") {
+        console.log("PING RECEIVED");
+
+        const pongPacket = {
+          id: `pong-${Date.now()}-${Math.random()}`,
+          type: "PONG",
+          from: "Me",
+          time: Date.now(),
+        };
+
+        await sendToDevice(senderDevice, pongPacket);
+        console.log("PONG SENT");
+        return;
+      }
+
+      if (packet.type === "PONG") {
+        console.log("PONG RECEIVED");
+        return;
+      }
+
+      if (packet.type === "ACK") {
+        console.log("DELIVERY CONFIRMED FOR:", packet.ackId);
+        return;
+      }
+
+      if (!packet.id || !packet.text) {
+        console.log("INVALID PACKET:", packet);
+        return;
+      }
+
+      if (seenMessagesRef.current.has(packet.id)) {
+        console.log("DUPLICATE MESSAGE IGNORED:", packet.id);
+        return;
+      }
+
+      seenMessagesRef.current.add(packet.id);
+
+      setChat(prev => [
+        ...prev,
+        {
+          id: packet.id,
+          text: `[FROM ${packet.from || "Unknown"}] ${packet.text}`,
+          type: "received",
+        },
+      ]);
+
+      const ackPacket = {
+        id: `ack-${Date.now()}-${Math.random()}`,
+        type: "ACK",
+        ackId: packet.id,
+        from: "Receiver",
+        text: "DELIVERED",
+      };
+
+      await sendToDevice(senderDevice, ackPacket);
+
+      if (packet.relay !== false) {
+        await relayPacket(packet, senderDevice?.address);
+      }
+    } catch (error) {
+      console.log("MESSAGE PARSE ERROR:", error);
+    }
+  };
+
+  const startReadingMessages = async device => {
+    try {
+      if (!device?.address) return;
+
+      console.log("STARTING LISTENER:", device.name || device.address);
+
+      if (subscriptionsRef.current[device.address]) {
+        subscriptionsRef.current[device.address]?.remove?.();
+      }
+
+      subscriptionsRef.current[device.address] = device.onDataReceived(event => {
+        const data = event?.data;
+
+        if (!data) return;
+
+        const messages = data
+          .split("\n")
+          .map(m => m.trim())
+          .filter(Boolean);
+
+        messages.forEach(msg => {
+          handleIncomingMessage(msg, device);
+        });
+      });
+
+      lastSeenRef.current[device.address] = Date.now();
+    } catch (error) {
+      console.log("READ ERROR:", error);
+    }
+  };
+
+  const startReceiveMode = async (autoRestart = false) => {
+    try {
+      if (receiving && !autoRestart) return;
+
+      const ready = await prepareBluetooth();
+      if (!ready) return;
+
+      setReceiving(true);
+
+      let device = null;
+
+      try {
+        console.log("ACCEPT SECURE...");
+        device = await RNBluetoothClassic.accept({
+          delimiter: "\n",
+          secureSocket: true,
+        });
+      } catch (e) {
+        console.log("SECURE ACCEPT FAILED:", e);
+      }
+
+      if (!device) {
+        try {
+          console.log("ACCEPT INSECURE...");
+          device = await RNBluetoothClassic.accept({
+            delimiter: "\n",
+            secureSocket: false,
+          });
+        } catch (e) {
+          console.log("INSECURE ACCEPT FAILED:", e);
+        }
+      }
+
+      if (!device) {
+        setReceiving(false);
+        if (!autoRestart) Alert.alert("Receive Failed", "Koi device connect nahi hua");
+        return;
+      }
+
+      console.log("RECEIVER CONNECTED:", device.name, device.address);
+
+      addConnectedDevice(device);
+      await startReadingMessages(device);
+      startHeartbeat();
+
+      setReceiving(false);
+
+      if (!autoRestart) {
+        Alert.alert("Connected", `${device.name || "Device"} connected`);
+      }
+    } catch (error) {
+      setReceiving(false);
+      console.log("RECEIVE ERROR:", error);
+
+      if (!autoRestart) {
+        Alert.alert("Receive Error", String(error?.message || error));
+      }
     }
   };
 
   const startScan = async () => {
     try {
-      const hasPermission = await requestPermissions();
-
-      if (!hasPermission) {
-        Alert.alert("Permission Required", "Bluetooth aur Location permission allow karo");
-        return;
-      }
-
-      const enabled = await RNBluetoothClassic.isBluetoothEnabled();
-
-      if (!enabled) {
-        await RNBluetoothClassic.requestBluetoothEnabled();
-      }
+      const ready = await prepareBluetooth();
+      if (!ready) return;
 
       setScanning(true);
 
       const bonded = await RNBluetoothClassic.getBondedDevices();
-      const discovered = await RNBluetoothClassic.startDiscovery();
+      let discovered = [];
+
+      try {
+        discovered = await RNBluetoothClassic.startDiscovery();
+      } catch (e) {
+        console.log("DISCOVERY ERROR:", e);
+      }
 
       const allDevices = [...bonded, ...discovered];
 
       const uniqueDevices = allDevices.filter(
         (device, index, self) =>
+          device?.address &&
           index === self.findIndex(d => d.address === device.address)
       );
 
@@ -88,181 +388,84 @@ export default function ChatScreen() {
       setScanning(false);
     } catch (error) {
       setScanning(false);
+      console.log("SCAN ERROR:", error);
       Alert.alert("Bluetooth Error", String(error?.message || error));
-    }
-  };
-
-  const forwardRelayMessage = async (packet, senderAddress) => {
-    if (packet.ttl <= 0) return;
-
-    const nextPacket = {
-      ...packet,
-      ttl: packet.ttl - 1,
-    };
-
-    for (const device of connectedDevices) {
-      if (device.address === senderAddress) continue;
-
-      try {
-        const isConnected = await device.isConnected();
-
-        if (isConnected) {
-          await device.write(JSON.stringify(nextPacket) + "\n");
-        }
-      } catch (error) {
-        console.log("Relay forward error:", error);
-      }
-    }
-  };
-
-  const handleIncomingMessage = async (rawMessage, senderDevice) => {
-    try {
-      const packet = JSON.parse(rawMessage);
-
-      if (!packet.id || !packet.text) return;
-
-      if (seenMessagesRef.current.has(packet.id)) {
-        return;
-      }
-
-      seenMessagesRef.current.add(packet.id);
-
-      setChat(prev => [
-        ...prev,
-        {
-          id: packet.id,
-          text: `[RELAY FROM ${packet.from || "Unknown"}] ${packet.text}`,
-          type: "received",
-        },
-      ]);
-
-      await forwardRelayMessage(packet, senderDevice.address);
-    } catch (error) {
-      setChat(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          text: rawMessage,
-          type: "received",
-        },
-      ]);
-    }
-  };
-
-  const startReadingMessages = device => {
-    try {
-      if (subscriptionsRef.current[device.address]) {
-        subscriptionsRef.current[device.address].remove();
-      }
-
-      subscriptionsRef.current[device.address] = device.onDataReceived(data => {
-        const receivedMessage = data?.data?.trim();
-
-        if (!receivedMessage) return;
-
-        handleIncomingMessage(receivedMessage, device);
-      });
-    } catch (error) {
-      console.log("Read Error:", error);
     }
   };
 
   const connectDevice = async device => {
     try {
-      const connected = await device.connect({
-        delimiter: "\n",
-        secureSocket: false,
-      });
+      console.log("CONNECTING:", device.name, device.address);
 
-      if (connected) {
-        setConnectedDevice(device);
+      let connected = false;
 
-        setConnectedDevices(prev => {
-          const exists = prev.find(d => d.address === device.address);
-          if (exists) return prev;
-          return [...prev, device];
+      try {
+        connected = await device.connect({
+          delimiter: "\n",
+          secureSocket: true,
         });
-
-        startReadingMessages(device);
-
-        Alert.alert("Connected", `${device.name || "Device"} connected successfully`);
-      } else {
-        Alert.alert("Failed", "Device connect nahi hua");
+      } catch (e) {
+        console.log("SECURE CONNECT FAILED:", e);
       }
+
+      if (!connected) {
+        try {
+          connected = await device.connect({
+            delimiter: "\n",
+            secureSocket: false,
+          });
+        } catch (e) {
+          console.log("INSECURE CONNECT FAILED:", e);
+        }
+      }
+
+      if (!connected) {
+        Alert.alert("Connection Failed", "Device connect nahi hua");
+        return;
+      }
+
+      addConnectedDevice(device);
+      await startReadingMessages(device);
+      startHeartbeat();
+
+      Alert.alert("Connected", `${device.name || "Device"} connected successfully`);
     } catch (error) {
+      console.log("CONNECT ERROR:", error);
       Alert.alert("Connect Error", String(error?.message || error));
     }
   };
 
   const sendSingleMessage = async () => {
     if (!connectedDevice) {
-      Alert.alert("No Device", "Pehle device connect karo");
-      return;
-    }
-
-    if (!message.trim()) return;
-
-    try {
-      const packet = {
-        id: `${Date.now()}-${Math.random()}`,
-        from: "Me",
-        text: message.trim(),
-        ttl: 0,
-      };
-
-      seenMessagesRef.current.add(packet.id);
-
-      await connectedDevice.write(JSON.stringify(packet) + "\n");
-
-      setChat(prev => [
-        ...prev,
-        {
-          id: packet.id,
-          text: `[SINGLE] ${packet.text}`,
-          type: "sent",
-        },
-      ]);
-
-      setMessage("");
-    } catch (error) {
-      Alert.alert("Send Error", String(error?.message || error));
-    }
-  };
-
-  const sendRelayMessage = async () => {
-    if (connectedDevices.length === 0) {
-      Alert.alert("No Devices", "Pehle devices connect karo");
+      Alert.alert("No Device", "Connect device first");
       return;
     }
 
     if (!message.trim()) return;
 
     const packet = {
-      id: `${Date.now()}-${Math.random()}`,
+      id: `msg-${Date.now()}-${Math.random()}`,
+      type: "MESSAGE",
       from: "Me",
       text: message.trim(),
-      ttl: 3,
+      relay: true,
+      time: Date.now(),
     };
 
     seenMessagesRef.current.add(packet.id);
 
-    for (const device of connectedDevices) {
-      try {
-        const isConnected = await device.isConnected();
+    const ok = await sendToDevice(connectedDevice, packet);
 
-        if (isConnected) {
-          await device.write(JSON.stringify(packet) + "\n");
-        }
-      } catch (error) {
-        console.log("Relay send error:", error);
-      }
+    if (!ok) {
+      Alert.alert("Send Failed", "Device disconnected hai");
+      return;
     }
 
     setChat(prev => [
       ...prev,
       {
         id: packet.id,
-        text: `[RELAY SENT] ${packet.text}`,
+        text: `[SENT] ${packet.text}`,
         type: "sent",
       },
     ]);
@@ -271,8 +474,10 @@ export default function ChatScreen() {
   };
 
   const sendSOSMessage = async () => {
-    if (connectedDevices.length === 0 && !connectedDevice) {
-      Alert.alert("No Device", "Pehle Bluetooth device connect karo");
+    const targets = devicesRef.current;
+
+    if (targets.length === 0) {
+      Alert.alert("No Device", "Connect device first");
       return;
     }
 
@@ -282,43 +487,39 @@ export default function ChatScreen() {
         timeout: 10000,
       });
 
-      const sosText = `SOS ALERT | Help needed under 100 Meter | Lat:${location.latitude} | Lng:${location.longitude}`;
+      const sosText = `SOS ALERT | Help needed | Lat:${location.latitude} | Lng:${location.longitude}`;
 
       const packet = {
-        id: `${Date.now()}-${Math.random()}`,
+        id: `sos-${Date.now()}-${Math.random()}`,
+        type: "SOS",
         from: "Me",
         text: sosText,
-        ttl: 3,
+        relay: true,
+        time: Date.now(),
       };
 
       seenMessagesRef.current.add(packet.id);
 
-      const targets = connectedDevices.length > 0 ? connectedDevices : [connectedDevice];
+      let successCount = 0;
 
       for (const device of targets) {
-        try {
-          const isConnected = await device.isConnected();
-          if (isConnected) {
-            await device.write(JSON.stringify(packet) + "\n");
-          }
-        } catch (error) {
-          console.log("SOS relay send error:", error);
-        }
+        const ok = await sendToDevice(device, packet);
+        if (ok) successCount++;
       }
 
       setChat(prev => [
         ...prev,
         {
           id: packet.id,
-          text: `[SOS RELAY] ${sosText}`,
+          text: `[SOS SENT ${successCount}/${targets.length}] ${sosText}`,
           type: "sent",
         },
       ]);
 
-      Alert.alert("SOS Sent", "SOS relay message send ho gaya");
+      Alert.alert("SOS Sent", `SOS ${successCount} device par send hua`);
     } catch (error) {
+      console.log("SOS ERROR:", error);
       Alert.alert("Location Error", "GPS ON karo aur location permission allow karo.");
-      console.log("SOS Error:", error);
     }
   };
 
@@ -337,40 +538,52 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Bluetooth Mesh Relay</Text>
+      <Text style={styles.title}>Bluetooth Mesh</Text>
 
-      <TouchableOpacity
-        style={[styles.scanBtn, scanning && styles.disabledBtn]}
-        onPress={startScan}
-        disabled={scanning}
-      >
-        <Text style={styles.scanText}>
-          {scanning ? "Scanning..." : "Start Bluetooth Scan"}
-        </Text>
-      </TouchableOpacity>
+      <Text style={styles.status}>
+        Active Devices: {connectedDevices.length}
+      </Text>
+
+      <View style={styles.modeRow}>
+        <TouchableOpacity
+          style={[styles.receiveBtn, receiving && styles.disabledBtn]}
+          onPress={() => startReceiveMode(false)}
+          disabled={receiving}
+        >
+          <Text style={styles.modeText}>
+            {receiving ? "Waiting..." : "Receive Mode"}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.scanBtn, scanning && styles.disabledBtn]}
+          onPress={startScan}
+          disabled={scanning}
+        >
+          <Text style={styles.modeText}>
+            {scanning ? "Scanning..." : "Send Mode / Scan"}
+          </Text>
+        </TouchableOpacity>
+      </View>
 
       <FlatList
-        data={devices}
+        data={devices}  
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
         ListEmptyComponent={
-          <Text style={styles.empty}>Scan karo, nearby devices yaha show honge.</Text>
+          <Text style={styles.empty}>Scan, Nearby Goddesses will be showing here.</Text>
         }
       />
 
       <TouchableOpacity style={styles.sosBtn} onPress={sendSOSMessage}>
-        <Text style={styles.sosText}>🚨 SEND SOS RELAY</Text>
+        <Text style={styles.sosText}>🚨 SOS / Send Offline Location</Text>
       </TouchableOpacity>
 
       <View style={styles.chatBox}>
         <Text style={styles.connectedText}>
           {connectedDevice
-            ? `Selected: ${connectedDevice.name || "Device"}`
-            : "No device selected"}
-        </Text>
-
-        <Text style={styles.connectedCount}>
-          Connected Devices: {connectedDevices.length}
+            ? `Connected: ${connectedDevice.name || "Device"}`
+            : "No device connected"}
         </Text>
 
         <FlatList
@@ -403,15 +616,9 @@ export default function ChatScreen() {
             value={message}
             onChangeText={setMessage}
           />
-        </View>
 
-        <View style={styles.buttonRow}>
           <TouchableOpacity style={styles.sendBtn} onPress={sendSingleMessage}>
             <Text style={styles.sendText}>Send</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.relayBtn} onPress={sendRelayMessage}>
-            <Text style={styles.sendText}>Relay</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -427,33 +634,39 @@ const styles = StyleSheet.create({
   },
   title: {
     color: "#fff",
-    fontSize: 26,
+    fontSize: 30,
     fontWeight: "900",
-    marginTop: 45,
+    marginTop: 50,
+    marginBottom: 8,
+  },
+  status: {
+    color: "#00E676",
+    fontWeight: "800",
+    marginBottom: 18,
+  },
+  modeRow: {
+    flexDirection: "row",
+    gap: 10,
     marginBottom: 20,
   },
-  scanBtn: {
-    backgroundColor: "#00E676",
-    padding: 14,
-    borderRadius: 25,
+  receiveBtn: {
+    flex: 1,
+    backgroundColor: "#008236",
+    paddingVertical: 16,
+    borderRadius: 30,
     alignItems: "center",
-    marginBottom: 20,
+  },
+  scanBtn: {
+    flex: 1,
+    backgroundColor: "#075D9C",
+    paddingVertical: 16,
+    borderRadius: 30,
+    alignItems: "center",
   },
   disabledBtn: {
     opacity: 0.6,
   },
-  scanText: {
-    color: "#04110A",
-    fontWeight: "900",
-  },
-  sosBtn: {
-    backgroundColor: "#EF4444",
-    padding: 14,
-    borderRadius: 25,
-    alignItems: "center",
-    marginBottom: 14,
-  },
-  sosText: {
+  modeText: {
     color: "#fff",
     fontWeight: "900",
     fontSize: 15,
@@ -465,48 +678,54 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
   },
   name: {
     color: "#fff",
-    fontSize: 16,
-    fontWeight: "700",
+    fontSize: 18,
+    fontWeight: "900",
   },
   address: {
     color: "#8C95A1",
-    marginTop: 4,
-    fontSize: 12,
+    marginTop: 6,
   },
   connectBtn: {
-    backgroundColor: "#122D22",
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
+    backgroundColor: "#063D24",
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    borderRadius: 22,
   },
   connectText: {
     color: "#00E676",
-    fontWeight: "800",
+    fontWeight: "900",
   },
   empty: {
     color: "#8C95A1",
     textAlign: "center",
     marginTop: 25,
   },
+  sosBtn: {
+    backgroundColor: "#FF2D3F",
+    padding: 16,
+    borderRadius: 28,
+    alignItems: "center",
+    marginVertical: 14,
+  },
+  sosText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 16,
+  },
   chatBox: {
     backgroundColor: "#0B1622",
     borderRadius: 18,
     padding: 12,
-    maxHeight: 360,
+    flex: 1,
   },
   connectedText: {
     color: "#00E676",
-    fontWeight: "700",
-    marginBottom: 5,
-  },
-  connectedCount: {
-    color: "#8C95A1",
+    fontWeight: "900",
     marginBottom: 10,
-    fontSize: 12,
+    fontSize: 16,
   },
   messageBubble: {
     alignSelf: "flex-end",
@@ -522,7 +741,7 @@ const styles = StyleSheet.create({
   },
   messageText: {
     color: "#04110A",
-    fontWeight: "700",
+    fontWeight: "800",
   },
   receivedText: {
     color: "#fff",
@@ -531,33 +750,21 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     marginTop: 10,
+    gap: 10,
   },
   input: {
     flex: 1,
     backgroundColor: "#050B12",
     color: "#fff",
-    borderRadius: 22,
+    borderRadius: 25,
     paddingHorizontal: 14,
-    paddingVertical: 10,
-  },
-  buttonRow: {
-    flexDirection: "row",
-    marginTop: 10,
-    gap: 10,
+    paddingVertical: 12,
   },
   sendBtn: {
-    flex: 1,
     backgroundColor: "#00E676",
-    paddingVertical: 11,
-    borderRadius: 22,
-    alignItems: "center",
-  },
-  relayBtn: {
-    flex: 1,
-    backgroundColor: "#3B82F6",
-    paddingVertical: 11,
-    borderRadius: 22,
-    alignItems: "center",
+    paddingVertical: 14,
+    paddingHorizontal: 22,
+    borderRadius: 25,
   },
   sendText: {
     color: "#04110A",

@@ -15,25 +15,25 @@ const slides = [
   {
     title: "Bluetooth Chat",
     image: require("../assets/intro/bt1.png"),
-    desc: "Nearby devices ke beech bina internet ke offline messages send aur receive kar sakte hain.",
+    desc: "You can send and receive offline messages between nearby devices without internet.",
   },
 
   {
     title: "Emergency SOS",
     image: require("../assets/intro/sos1.png"),
-    desc: "Emergency situation me SOS alert connected device ko bheja ja sakta hai.",
+    desc: "In emergency situations, you can send SOS alerts to connected devices.",
   },
 
   {
     title: "Location Sharing",
     image: require("../assets/intro/loc1.png"),
-    desc: "Internet ke bina location details share karne ka feature.",
+    desc: "Share location details without internet.",
   },
 
   {
     title: "AI Assistance",
     image: require("../assets/intro/ai1.png"),
-    desc: "AI smart alerts aur report generation ke liye future scope me use hoga.",
+    desc: "Future scope will be for iSmart alerts and report generation.",
   },
 ];
 

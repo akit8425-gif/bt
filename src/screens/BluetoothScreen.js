@@ -9,24 +9,46 @@ import {
   Platform,
   Alert,
   TextInput,
+  ScrollView,
 } from "react-native";
 
 import RNBluetoothClassic from "react-native-bluetooth-classic";
 import GetLocation from "react-native-get-location";
 
-export default function BluetoothScreen({ navigation }) {
+const HEARTBEAT_INTERVAL = 5000;
+const DEAD_TIMEOUT = 30000;
+
+export default function BluetoothScreen() {
   const [devices, setDevices] = useState([]);
+  const [connectedDevices, setConnectedDevices] = useState([]);
+  const [selectedDevice, setSelectedDevice] = useState(null);
   const [scanning, setScanning] = useState(false);
-  const [connectedDevice, setConnectedDevice] = useState(null);
+  const [receiving, setReceiving] = useState(false);
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
 
-  const subscriptionRef = useRef(null);
+  const subscriptionsRef = useRef({});
+  const connectedDevicesRef = useRef([]);
+  const savedDevicesRef = useRef({});
+  const lastSeenRef = useRef({});
+  const seenMessagesRef = useRef(new Set());
+  const heartbeatRef = useRef(null);
+  const receiveLoopRef = useRef(false);
+
+  useEffect(() => {
+    connectedDevicesRef.current = connectedDevices;
+  }, [connectedDevices]);
 
   useEffect(() => {
     return () => {
-      if (subscriptionRef.current) {
-        subscriptionRef.current.remove();
+      receiveLoopRef.current = false;
+
+      Object.values(subscriptionsRef.current).forEach(sub => {
+        sub?.remove?.();
+      });
+
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
       }
     };
   }, []);
@@ -46,42 +68,347 @@ export default function BluetoothScreen({ navigation }) {
 
       const result = await PermissionsAndroid.requestMultiple(permissions);
 
+      console.log("PERMISSION RESULT:", result);
+
       return permissions.every(
         permission => result[permission] === PermissionsAndroid.RESULTS.GRANTED
       );
     } catch (error) {
-      console.log("Permission error:", error);
+      console.log("PERMISSION ERROR:", error);
       return false;
     }
   };
 
-  const startScan = async () => {
-    try {
-      const hasPermission = await requestPermissions();
+  const prepareBluetooth = async () => {
+    const hasPermission = await requestPermissions();
 
-      if (!hasPermission) {
-        Alert.alert(
-          "Permission Required",
-          "Allow necessary permissions to scan for Bluetooth/Location devices."
-        );
+    if (!hasPermission) {
+      Alert.alert("Permission Required", "Bluetooth aur Location permission allow karo.");
+      return false;
+    }
+
+    const enabled = await RNBluetoothClassic.isBluetoothEnabled();
+
+    if (!enabled) {
+      await RNBluetoothClassic.requestBluetoothEnabled();
+    }
+
+    return true;
+  };
+
+  const addConnectedDevice = device => {
+    if (!device?.address) return;
+
+    savedDevicesRef.current[device.address] = device;
+    lastSeenRef.current[device.address] = Date.now();
+
+    setSelectedDevice(prev => prev || device);
+
+    setConnectedDevices(prev => {
+      const exists = prev.find(d => d.address === device.address);
+      if (exists) return prev;
+      return [...prev, device];
+    });
+  };
+
+  const removeConnectedDevice = address => {
+    console.log("REMOVE DEVICE:", address);
+
+    subscriptionsRef.current[address]?.remove?.();
+    delete subscriptionsRef.current[address];
+    delete savedDevicesRef.current[address];
+    delete lastSeenRef.current[address];
+
+    setConnectedDevices(prev => {
+      const updated = prev.filter(d => d.address !== address);
+
+      setSelectedDevice(current => {
+        if (current?.address === address) {
+          return updated[0] || null;
+        }
+        return current;
+      });
+
+      return updated;
+    });
+  };
+
+  const sendToDevice = async (device, packet) => {
+    try {
+      if (!device?.address) return false;
+
+      const isConnected = await device.isConnected();
+
+      if (!isConnected) {
+        console.log("DEVICE NOT CONNECTED:", device.name || device.address);
+        return false;
+      }
+
+      await device.write(JSON.stringify(packet) + "\n");
+
+      lastSeenRef.current[device.address] = Date.now();
+      savedDevicesRef.current[device.address] = device;
+
+      return true;
+    } catch (error) {
+      console.log("SEND TO DEVICE ERROR:", error);
+      return false;
+    }
+  };
+
+  const relayPacket = async (packet, senderAddress) => {
+    const targets = connectedDevicesRef.current.filter(
+      d => d.address !== senderAddress
+    );
+
+    console.log("RELAY TARGETS:", targets.length);
+
+    for (const device of targets) {
+      const ok = await sendToDevice(device, packet);
+      console.log("RELAY RESULT:", device.name || device.address, ok);
+    }
+  };
+
+  const handleIncomingMessage = async (rawMessage, senderDevice) => {
+    console.log("RAW RECEIVED:", rawMessage);
+
+    try {
+      const packet = JSON.parse(rawMessage);
+
+      if (senderDevice?.address) {
+        lastSeenRef.current[senderDevice.address] = Date.now();
+      }
+
+      if (packet.type === "PING") {
+        const pongPacket = {
+          id: `pong-${Date.now()}-${Math.random()}`,
+          type: "PONG",
+          from: "Me",
+          time: Date.now(),
+        };
+
+        await sendToDevice(senderDevice, pongPacket);
+        console.log("PONG SENT");
         return;
       }
 
-      const enabled = await RNBluetoothClassic.isBluetoothEnabled();
-
-      if (!enabled) {
-        await RNBluetoothClassic.requestBluetoothEnabled();
+      if (packet.type === "PONG") {
+        console.log("PONG RECEIVED");
+        return;
       }
+
+      if (packet.type === "ACK") {
+        console.log("DELIVERY CONFIRMED:", packet.ackId);
+        return;
+      }
+
+      if (!packet.id || !packet.text) {
+        console.log("INVALID PACKET:", packet);
+        return;
+      }
+
+      if (seenMessagesRef.current.has(packet.id)) {
+        console.log("DUPLICATE IGNORED:", packet.id);
+        return;
+      }
+
+      seenMessagesRef.current.add(packet.id);
+
+      setChat(prev => [
+        ...prev,
+        {
+          id: packet.id,
+          text: `[FROM ${packet.from || "Unknown"}] ${packet.text}`,
+          type: "received",
+        },
+      ]);
+
+      const ackPacket = {
+        id: `ack-${Date.now()}-${Math.random()}`,
+        type: "ACK",
+        ackId: packet.id,
+        from: "Receiver",
+        text: "DELIVERED",
+      };
+
+      await sendToDevice(senderDevice, ackPacket);
+
+      if (packet.relay !== false) {
+        await relayPacket(packet, senderDevice?.address);
+      }
+    } catch (error) {
+      console.log("PARSE ERROR:", error);
+
+      setChat(prev => [
+        ...prev,
+        {
+          id: `raw-${Date.now()}-${Math.random()}`,
+          text: rawMessage,
+          type: "received",
+        },
+      ]);
+    }
+  };
+
+  const startReadingMessages = device => {
+    try {
+      if (!device?.address) return;
+
+      if (subscriptionsRef.current[device.address]) {
+        subscriptionsRef.current[device.address]?.remove?.();
+      }
+
+      subscriptionsRef.current[device.address] = device.onDataReceived(event => {
+        const data = event?.data;
+
+        if (!data) return;
+
+        const messages = data
+          .split("\n")
+          .map(item => item.trim())
+          .filter(Boolean);
+
+        messages.forEach(msg => {
+          handleIncomingMessage(msg, device);
+        });
+      });
+
+      console.log("LISTENER STARTED:", device.name || device.address);
+    } catch (error) {
+      console.log("READ ERROR:", error);
+    }
+  };
+
+  const startHeartbeat = () => {
+    if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+
+    heartbeatRef.current = setInterval(async () => {
+      const now = Date.now();
+
+      for (const device of connectedDevicesRef.current) {
+        try {
+          const isConnected = await device.isConnected();
+          const lastSeen = lastSeenRef.current[device.address] || 0;
+
+          console.log("HEARTBEAT:", {
+            device: device.name || device.address,
+            isConnected,
+            lastSeenAgo: now - lastSeen,
+          });
+
+          if (!isConnected || now - lastSeen > DEAD_TIMEOUT) {
+            removeConnectedDevice(device.address);
+            continue;
+          }
+
+          const pingPacket = {
+            id: `ping-${Date.now()}-${Math.random()}`,
+            type: "PING",
+            from: "Me",
+            time: Date.now(),
+          };
+
+          await sendToDevice(device, pingPacket);
+        } catch (error) {
+          console.log("HEARTBEAT ERROR:", error);
+          removeConnectedDevice(device.address);
+        }
+      }
+    }, HEARTBEAT_INTERVAL);
+  };
+
+  const startReceiveMode = async () => {
+    try {
+      const ready = await prepareBluetooth();
+      if (!ready) return;
+
+      if (receiveLoopRef.current) {
+        Alert.alert("Already Running", "Receive mode already ON hai.");
+        return;
+      }
+
+      receiveLoopRef.current = true;
+      setReceiving(true);
+
+      Alert.alert(
+        "Receive Mode ON",
+        "Ab naye devices is phone se connect ho sakte hain."
+      );
+
+      while (receiveLoopRef.current) {
+        try {
+          console.log("WAITING FOR NEW DEVICE...");
+
+          let device = null;
+
+          try {
+            device = await RNBluetoothClassic.accept({
+              delimiter: "\n",
+              secureSocket: true,
+              timeout: 120000,
+            });
+          } catch (e) {
+            console.log("SECURE ACCEPT FAILED:", e);
+          }
+
+          if (!device) {
+            try {
+              device = await RNBluetoothClassic.accept({
+                delimiter: "\n",
+                secureSocket: false,
+                timeout: 120000,
+              });
+            } catch (e) {
+              console.log("INSECURE ACCEPT FAILED:", e);
+            }
+          }
+
+          if (device?.address) {
+            console.log("NEW DEVICE CONNECTED:", device.name, device.address);
+
+            addConnectedDevice(device);
+            startReadingMessages(device);
+            startHeartbeat();
+          }
+        } catch (error) {
+          console.log("ACCEPT LOOP ERROR:", error);
+        }
+      }
+    } catch (error) {
+      console.log("RECEIVE MODE ERROR:", error);
+      Alert.alert("Receive Error", String(error?.message || error));
+    } finally {
+      setReceiving(false);
+    }
+  };
+
+  const stopReceiveMode = () => {
+    receiveLoopRef.current = false;
+    setReceiving(false);
+    Alert.alert("Receive Mode OFF", "Naye devices accept hona band ho jayega.");
+  };
+
+  const startScan = async () => {
+    try {
+      const ready = await prepareBluetooth();
+      if (!ready) return;
 
       setScanning(true);
 
       const bonded = await RNBluetoothClassic.getBondedDevices();
-      const discovered = await RNBluetoothClassic.startDiscovery();
+
+      let discovered = [];
+      try {
+        discovered = await RNBluetoothClassic.startDiscovery();
+      } catch (e) {
+        console.log("DISCOVERY ERROR:", e);
+      }
 
       const allDevices = [...bonded, ...discovered];
 
       const uniqueDevices = allDevices.filter(
         (device, index, self) =>
+          device?.address &&
           index === self.findIndex(d => d.address === device.address)
       );
 
@@ -89,182 +416,305 @@ export default function BluetoothScreen({ navigation }) {
       setScanning(false);
     } catch (error) {
       setScanning(false);
+      console.log("SCAN ERROR:", error);
       Alert.alert("Bluetooth Error", String(error?.message || error));
-    }
-  };
-
-  const startReadingMessages = device => {
-    try {
-      if (subscriptionRef.current) {
-        subscriptionRef.current.remove();
-      }
-
-      subscriptionRef.current = device.onDataReceived(data => {
-        const receivedMessage = data?.data?.trim();
-
-        if (!receivedMessage) return;
-
-        setChat(prev => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            text: receivedMessage,
-            type: "received",
-          },
-        ]);
-      });
-    } catch (error) {
-      console.log("Read error:", error);
     }
   };
 
   const connectDevice = async device => {
     try {
-      const connected = await device.connect({
-        delimiter: "\n",
-      });
+      if (!device?.address) return;
 
-      if (connected) {
-        setConnectedDevice(device);
-        startReadingMessages(device);
+      const alreadyConnected = connectedDevicesRef.current.some(
+        d => d.address === device.address
+      );
+
+      if (alreadyConnected) {
+        setSelectedDevice(device);
+        Alert.alert("Already Connected", `${device.name || "Device"} already connected hai.`);
+        return;
       }
 
-      Alert.alert(
-        connected ? "Connected" : "Failed",
-        connected
-          ? `${device.name || "Device"} connected`
-          : " Device not connected"
-      );
+      let connected = false;
+
+      try {
+        connected = await device.connect({
+          delimiter: "\n",
+          secureSocket: true,
+        });
+      } catch (e) {
+        console.log("SECURE CONNECT FAILED:", e);
+      }
+
+      if (!connected) {
+        try {
+          connected = await device.connect({
+            delimiter: "\n",
+            secureSocket: false,
+          });
+        } catch (e) {
+          console.log("INSECURE CONNECT FAILED:", e);
+        }
+      }
+
+      if (!connected) {
+        Alert.alert("Connection Failed", "Device connect nahi hua.");
+        return;
+      }
+
+      addConnectedDevice(device);
+      startReadingMessages(device);
+      startHeartbeat();
+
+      Alert.alert("Connected", `${device.name || "Device"} connected successfully.`);
     } catch (error) {
+      console.log("CONNECT ERROR:", error);
       Alert.alert("Connect Error", String(error?.message || error));
     }
   };
 
-  const sendMessage = async () => {
-    if (!connectedDevice) {
-      Alert.alert("No Device", "Connect device first");
+  const sendSingleMessage = async () => {
+    if (!selectedDevice) {
+      Alert.alert("No Device", "Pehle kisi connected device ko select karo.");
       return;
     }
 
     if (!message.trim()) return;
 
-    try {
-      await connectedDevice.write(message.trim() + "\n");
+    const packet = {
+      id: `msg-${Date.now()}-${Math.random()}`,
+      type: "MESSAGE",
+      from: "Me",
+      text: message.trim(),
+      relay: false,
+      time: Date.now(),
+    };
 
-      setChat(prev => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          text: message.trim(),
-          type: "sent",
-        },
-      ]);
+    seenMessagesRef.current.add(packet.id);
 
-      setMessage("");
-    } catch (error) {
-      Alert.alert("Send Error", String(error?.message || error));
+    const ok = await sendToDevice(selectedDevice, packet);
+
+    if (!ok) {
+      Alert.alert("Send Failed", "Selected device connected nahi hai.");
+      return;
+    }
+
+    setChat(prev => [
+      ...prev,
+      {
+        id: packet.id,
+        text: `[SENT TO ${selectedDevice.name || "Device"}] ${packet.text}`,
+        type: "sent",
+      },
+    ]);
+
+    setMessage("");
+  };
+
+  const sendBroadcastMessage = async () => {
+    if (!message.trim()) return;
+
+    const targets = connectedDevicesRef.current;
+
+    if (targets.length === 0) {
+      Alert.alert("No Relay Devices", "Pehle ek ya zyada devices connect karo.");
+      return;
+    }
+
+    const packet = {
+      id: `broadcast-${Date.now()}-${Math.random()}`,
+      type: "BROADCAST",
+      from: "Me",
+      text: message.trim(),
+      relay: true,
+      time: Date.now(),
+    };
+
+    seenMessagesRef.current.add(packet.id);
+
+    let successCount = 0;
+
+    for (const device of targets) {
+      const ok = await sendToDevice(device, packet);
+      if (ok) successCount++;
+    }
+
+    setChat(prev => [
+      ...prev,
+      {
+        id: packet.id,
+        text: `[BROADCAST ${successCount}/${targets.length}] ${packet.text}`,
+        type: "sent",
+      },
+    ]);
+
+    setMessage("");
+
+    if (successCount === 0) {
+      Alert.alert(
+        "Broadcast Failed",
+        "Koi active socket nahi mila. Receiver phone par Receive Mode ON rakho."
+      );
     }
   };
 
   const sendSOSMessage = async () => {
-    if (!connectedDevice) {
-      Alert.alert("No Device", "Connect Bluetooth device first");
+    const targets = connectedDevicesRef.current;
+
+    if (targets.length === 0) {
+      Alert.alert("No Device", "Pehle Bluetooth device connect karo.");
       return;
     }
 
     try {
       const location = await GetLocation.getCurrentPosition({
-        enableHighAccuracy: true,
-        timeout: 15000,
+        enableHighAccuracy: false,
+        timeout: 10000,
       });
 
-      const sosMessage = `
-🚨 SOS EMERGENCY 🚨
+      const sosText = `🚨 SOS ALERT | Help needed | Lat:${location.latitude} | Lng:${location.longitude}`;
 
-Mera naam Abhishek hai.
-Mujhe turant help chahiye.
+      const packet = {
+        id: `sos-${Date.now()}-${Math.random()}`,
+        type: "SOS",
+        from: "Me",
+        text: sosText,
+        relay: true,
+        time: Date.now(),
+      };
 
-📍 Offline Current Location:
-Latitude: ${location.latitude}
-Longitude: ${location.longitude}
+      seenMessagesRef.current.add(packet.id);
 
-⚠ Internet available nahi hai.
-Bluetooth Mesh Emergency Alert.
-`;
+      let successCount = 0;
 
-      await connectedDevice.write(sosMessage + "\n");
+      for (const device of targets) {
+        const ok = await sendToDevice(device, packet);
+        if (ok) successCount++;
+      }
 
       setChat(prev => [
         ...prev,
         {
-          id: Date.now().toString(),
-          text: sosMessage,
+          id: packet.id,
+          text: `[SOS ${successCount}/${targets.length}] ${sosText}`,
           type: "sent",
         },
       ]);
 
-      navigation.navigate("ChatScreen", {
-        connectedDevice,
-        sosMessage,
-        latitude: location.latitude,
-        longitude: location.longitude,
-      });
+      Alert.alert("SOS Sent", `SOS ${successCount}/${targets.length} devices par send hua.`);
     } catch (error) {
-      Alert.alert(
-        "Location Error",
-        "Turn on GPS and allow location permission."
-      );
-      console.log(error);
+      console.log("SOS ERROR:", error);
+      Alert.alert("Location Error", "GPS ON karo aur location permission allow karo.");
     }
   };
 
-  const renderDevice = ({ item }) => (
-    <View style={styles.card}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.name}>{item.name || "Unknown Device"}</Text>
-        <Text style={styles.address}>{item.address || "No address"}</Text>
-      </View>
+  const renderDevice = ({ item }) => {
+    const isConnected = connectedDevices.some(d => d.address === item.address);
+    const isSelected = selectedDevice?.address === item.address;
 
-      <TouchableOpacity style={styles.btn} onPress={() => connectDevice(item)}>
-        <Text style={styles.btnText}>Connect</Text>
+    return (
+      <View style={[styles.card, isSelected && styles.selectedCard]}>
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          onPress={() => {
+            if (isConnected) setSelectedDevice(item);
+          }}
+        >
+          <Text style={styles.name}>{item.name || "Unknown Device"}</Text>
+          <Text style={styles.address}>{item.address || "No Address"}</Text>
+          <Text style={isConnected ? styles.online : styles.offline}>
+            {isConnected ? "● Connected / Relay Ready" : "● Not Connected"}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.btn, isConnected && styles.connectedBtn]}
+          onPress={() => connectDevice(item)}
+          disabled={isConnected}
+        >
+          <Text style={styles.btnText}>
+            {isConnected ? "Connected" : "Connect"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const renderConnectedDevice = ({ item }) => {
+    const isSelected = selectedDevice?.address === item.address;
+
+    return (
+      <TouchableOpacity
+        style={[styles.connectedChip, isSelected && styles.activeChip]}
+        onPress={() => setSelectedDevice(item)}
+      >
+        <Text style={styles.chipText}>
+          {isSelected ? "✓ " : ""}
+          {item.name || "Device"}
+        </Text>
       </TouchableOpacity>
-    </View>
-  );
+    );
+  };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Bluetooth Mesh</Text>
+      <Text style={styles.title}>Bluetooth Mesh Relay</Text>
 
-      <TouchableOpacity
-        style={[styles.scanBtn, scanning && styles.disabledBtn]}
-        onPress={startScan}
-        disabled={scanning}
-      >
-        <Text style={styles.scanText}>
-          {scanning ? "Scanning..." : "Start Bluetooth Scan"}
-        </Text>
-      </TouchableOpacity>
+      <Text style={styles.status}>
+        Active Relay Devices: {connectedDevices.length}
+      </Text>
+
+      <View style={styles.modeRow}>
+        <TouchableOpacity
+          style={[styles.receiveBtn, receiving && styles.stopBtn]}
+          onPress={receiving ? stopReceiveMode : startReceiveMode}
+        >
+          <Text style={styles.modeText}>
+            {receiving ? "Stop Receive" : "Receive Mode"}
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.sendModeBtn, scanning && styles.disabledBtn]}
+          onPress={startScan}
+          disabled={scanning}
+        >
+          <Text style={styles.modeText}>
+            {scanning ? "Scanning..." : "Scan New"}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      <FlatList
+        data={connectedDevices}
+        horizontal
+        keyExtractor={(item, index) => item.address || String(index)}
+        renderItem={renderConnectedDevice}
+        showsHorizontalScrollIndicator={false}
+        ListEmptyComponent={
+          <Text style={styles.emptySmall}>No active relay device</Text>
+        }
+      />
 
       <FlatList
         data={devices}
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
+        style={styles.deviceList}
         ListEmptyComponent={
-          <Text style={styles.empty}>
-Scan, Devices will be showing here.
-          </Text>
+          <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
         }
       />
 
       <TouchableOpacity style={styles.sosBtn} onPress={sendSOSMessage}>
-        <Text style={styles.sosText}>🚨 SOS / Send Offline Location</Text>
+        <Text style={styles.sosText}>🚨 SOS Broadcast Location</Text>
       </TouchableOpacity>
 
       <View style={styles.chatBox}>
         <Text style={styles.connectedText}>
-          {connectedDevice
-            ? `Connected: ${connectedDevice.name || "Device"}`
-            : "No device connected"}
+          {selectedDevice
+            ? `Selected: ${selectedDevice.name || "Device"}`
+            : "No selected device"}
         </Text>
 
         <FlatList
@@ -298,8 +748,12 @@ Scan, Devices will be showing here.
             onChangeText={setMessage}
           />
 
-          <TouchableOpacity style={styles.sendBtn} onPress={sendMessage}>
+          <TouchableOpacity style={styles.sendBtn} onPress={sendSingleMessage}>
             <Text style={styles.sendText}>Send</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.broadcastBtn} onPress={sendBroadcastMessage}>
+            <Text style={styles.broadcastText}>All</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -311,28 +765,128 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#050B12",
-    padding: 20,
+    padding: 18,
   },
   title: {
     color: "#fff",
-    fontSize: 24,
-    fontWeight: "800",
+    fontSize: 26,
+    fontWeight: "900",
     marginTop: 45,
-    marginBottom: 20,
+    marginBottom: 6,
   },
-  scanBtn: {
-    backgroundColor: "#00E676",
+  status: {
+    color: "#00E676",
+    fontWeight: "800",
+    marginBottom: 14,
+  },
+  modeRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 12,
+  },
+  receiveBtn: {
+    flex: 1,
+    backgroundColor: "#0B6B3A",
     padding: 14,
     borderRadius: 25,
     alignItems: "center",
-    marginBottom: 20,
+  },
+  stopBtn: {
+    backgroundColor: "#B91C1C",
+  },
+  sendModeBtn: {
+    flex: 1,
+    backgroundColor: "#064E8A",
+    padding: 14,
+    borderRadius: 25,
+    alignItems: "center",
+  },
+  modeText: {
+    color: "#fff",
+    fontWeight: "900",
+    fontSize: 13,
   },
   disabledBtn: {
     opacity: 0.6,
   },
-  scanText: {
-    color: "#04110A",
+  connectedChip: {
+    backgroundColor: "#0B1622",
+    borderColor: "#1E293B",
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginRight: 8,
+    marginBottom: 10,
+  },
+  activeChip: {
+    borderColor: "#00E676",
+    backgroundColor: "#063D24",
+  },
+  chipText: {
+    color: "#fff",
     fontWeight: "800",
+    fontSize: 12,
+  },
+  deviceList: {
+    maxHeight: 190,
+  },
+  card: {
+    backgroundColor: "#0B1622",
+    borderRadius: 15,
+    padding: 14,
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#0B1622",
+  },
+  selectedCard: {
+    borderColor: "#00E676",
+  },
+  name: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  address: {
+    color: "#8C95A1",
+    fontSize: 12,
+    marginTop: 4,
+  },
+  online: {
+    color: "#00E676",
+    fontWeight: "800",
+    marginTop: 5,
+    fontSize: 12,
+  },
+  offline: {
+    color: "#FFB020",
+    fontWeight: "800",
+    marginTop: 5,
+    fontSize: 12,
+  },
+  btn: {
+    backgroundColor: "#122D22",
+    paddingVertical: 9,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+  },
+  connectedBtn: {
+    opacity: 0.7,
+  },
+  btnText: {
+    color: "#00E676",
+    fontWeight: "800",
+  },
+  empty: {
+    color: "#8C95A1",
+    textAlign: "center",
+    marginTop: 25,
+  },
+  emptySmall: {
+    color: "#8C95A1",
+    marginBottom: 10,
   },
   sosBtn: {
     backgroundColor: "#EF4444",
@@ -347,49 +901,15 @@ const styles = StyleSheet.create({
     fontWeight: "900",
     fontSize: 15,
   },
-  card: {
-    backgroundColor: "#0B1622",
-    borderRadius: 15,
-    padding: 15,
-    marginBottom: 12,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  name: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  address: {
-    color: "#8C95A1",
-    fontSize: 12,
-    marginTop: 4,
-  },
-  btn: {
-    backgroundColor: "#122D22",
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-  },
-  btnText: {
-    color: "#00E676",
-    fontWeight: "700",
-  },
-  empty: {
-    color: "#8C95A1",
-    textAlign: "center",
-    marginTop: 30,
-  },
   chatBox: {
     backgroundColor: "#0B1622",
     borderRadius: 16,
     padding: 12,
-    maxHeight: 280,
+    flex: 1,
   },
   connectedText: {
     color: "#00E676",
-    fontWeight: "700",
+    fontWeight: "800",
     marginBottom: 10,
   },
   messageBubble: {
@@ -406,7 +926,7 @@ const styles = StyleSheet.create({
   },
   messageText: {
     color: "#04110A",
-    fontWeight: "600",
+    fontWeight: "700",
   },
   receivedText: {
     color: "#fff",
@@ -415,6 +935,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     marginTop: 10,
+    gap: 8,
   },
   input: {
     flex: 1,
@@ -423,16 +944,25 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    marginRight: 8,
   },
   sendBtn: {
     backgroundColor: "#00E676",
-    paddingHorizontal: 18,
+    paddingHorizontal: 15,
     paddingVertical: 11,
     borderRadius: 22,
   },
   sendText: {
     color: "#04110A",
-    fontWeight: "800",
+    fontWeight: "900",
+  },
+  broadcastBtn: {
+    backgroundColor: "#2563EB",
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 22,
+  },
+  broadcastText: {
+    color: "#fff",
+    fontWeight: "900",
   },
 });
