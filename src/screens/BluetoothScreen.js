@@ -9,7 +9,7 @@ import {
   Platform,
   Alert,
   TextInput,
-  ScrollView,
+  SafeAreaView,
 } from "react-native";
 
 import RNBluetoothClassic from "react-native-bluetooth-classic";
@@ -42,14 +42,8 @@ export default function BluetoothScreen() {
   useEffect(() => {
     return () => {
       receiveLoopRef.current = false;
-
-      Object.values(subscriptionsRef.current).forEach(sub => {
-        sub?.remove?.();
-      });
-
-      if (heartbeatRef.current) {
-        clearInterval(heartbeatRef.current);
-      }
+      Object.values(subscriptionsRef.current).forEach(sub => sub?.remove?.());
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
     };
   }, []);
 
@@ -67,7 +61,6 @@ export default function BluetoothScreen() {
           : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
       const result = await PermissionsAndroid.requestMultiple(permissions);
-
       console.log("PERMISSION RESULT:", result);
 
       return permissions.every(
@@ -330,10 +323,7 @@ export default function BluetoothScreen() {
       receiveLoopRef.current = true;
       setReceiving(true);
 
-      Alert.alert(
-        "Receive Mode ON",
-        "Ab naye devices is phone se connect ho sakte hain."
-      );
+      Alert.alert("Receive Mode ON", "Ab naye devices is phone se connect ho sakte hain.");
 
       while (receiveLoopRef.current) {
         try {
@@ -613,9 +603,13 @@ export default function BluetoothScreen() {
     const isSelected = selectedDevice?.address === item.address;
 
     return (
-      <View style={[styles.card, isSelected && styles.selectedCard]}>
+      <View style={[styles.deviceCard, isSelected && styles.selectedCard]}>
+        <View style={styles.deviceIconBox}>
+          <Text style={styles.deviceIcon}>⌁</Text>
+        </View>
+
         <TouchableOpacity
-          style={{ flex: 1 }}
+          style={styles.deviceInfo}
           onPress={() => {
             if (isConnected) setSelectedDevice(item);
           }}
@@ -628,12 +622,12 @@ export default function BluetoothScreen() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.btn, isConnected && styles.connectedBtn]}
+          style={[styles.connectBtn, isConnected && styles.connectedBtn]}
           onPress={() => connectDevice(item)}
           disabled={isConnected}
         >
-          <Text style={styles.btnText}>
-            {isConnected ? "Connected" : "Connect"}
+          <Text style={styles.connectBtnText}>
+            {isConnected ? "Linked" : "Link"}
           </Text>
         </TouchableOpacity>
       </View>
@@ -648,41 +642,56 @@ export default function BluetoothScreen() {
         style={[styles.connectedChip, isSelected && styles.activeChip]}
         onPress={() => setSelectedDevice(item)}
       >
-        <Text style={styles.chipText}>
-          {isSelected ? "✓ " : ""}
-          {item.name || "Device"}
-        </Text>
+        <Text style={styles.chipDot}>●</Text>
+        <Text style={styles.chipText}>{item.name || "Device"}</Text>
       </TouchableOpacity>
     );
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Bluetooth Mesh Relay</Text>
+    <SafeAreaView style={styles.container}>
+      <View style={styles.glowOne} />
+      <View style={styles.glowTwo} />
 
-      <Text style={styles.status}>
-        Active Relay Devices: {connectedDevices.length}
-      </Text>
+      <View style={styles.headerCard}>
+        <View>
+          <Text style={styles.appLabel}>OFFLINE BLUETOOTH MESH</Text>
+          <Text style={styles.title}>Mesh Relay</Text>
+          <Text style={styles.subtitle}>Secure device-to-device communication</Text>
+        </View>
 
-      <View style={styles.modeRow}>
+        <View style={styles.nodeBox}>
+          <Text style={styles.nodeCount}>{connectedDevices.length}</Text>
+          <Text style={styles.nodeText}>Nodes</Text>
+        </View>
+      </View>
+
+      <View style={styles.actionPanel}>
         <TouchableOpacity
-          style={[styles.receiveBtn, receiving && styles.stopBtn]}
+          style={[styles.actionBtn, styles.receiveBtn, receiving && styles.stopBtn]}
           onPress={receiving ? stopReceiveMode : startReceiveMode}
         >
-          <Text style={styles.modeText}>
+          <Text style={styles.actionIcon}>{receiving ? "■" : "◉"}</Text>
+          <Text style={styles.actionText}>
             {receiving ? "Stop Receive" : "Receive Mode"}
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.sendModeBtn, scanning && styles.disabledBtn]}
+          style={[styles.actionBtn, styles.scanBtn, scanning && styles.disabledBtn]}
           onPress={startScan}
           disabled={scanning}
         >
-          <Text style={styles.modeText}>
+          <Text style={styles.actionIcon}>⌕</Text>
+          <Text style={styles.actionText}>
             {scanning ? "Scanning..." : "Scan New"}
           </Text>
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Active Relay Nodes</Text>
+        <Text style={styles.sectionMeta}>{connectedDevices.length} online</Text>
       </View>
 
       <FlatList
@@ -691,18 +700,28 @@ export default function BluetoothScreen() {
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderConnectedDevice}
         showsHorizontalScrollIndicator={false}
+        style={styles.chipList}
         ListEmptyComponent={
           <Text style={styles.emptySmall}>No active relay device</Text>
         }
       />
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Available Devices</Text>
+        <Text style={styles.sectionMeta}>Bluetooth scan</Text>
+      </View>
 
       <FlatList
         data={devices}
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
         style={styles.deviceList}
+        showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>⌁</Text>
+            <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+          </View>
         }
       />
 
@@ -711,15 +730,25 @@ export default function BluetoothScreen() {
       </TouchableOpacity>
 
       <View style={styles.chatBox}>
-        <Text style={styles.connectedText}>
-          {selectedDevice
-            ? `Selected: ${selectedDevice.name || "Device"}`
-            : "No selected device"}
-        </Text>
+        <View style={styles.chatHeader}>
+          <View>
+            <Text style={styles.chatTitle}>Secure Chat</Text>
+            <Text style={styles.connectedText}>
+              {selectedDevice
+                ? `Selected: ${selectedDevice.name || "Device"}`
+                : "No selected device"}
+            </Text>
+          </View>
+
+          <View style={styles.chatBadge}>
+            <Text style={styles.chatBadgeText}>{chat.length}</Text>
+          </View>
+        </View>
 
         <FlatList
           data={chat}
           keyExtractor={item => item.id}
+          showsVerticalScrollIndicator={false}
           renderItem={({ item }) => (
             <View
               style={[
@@ -737,13 +766,16 @@ export default function BluetoothScreen() {
               </Text>
             </View>
           )}
+          ListEmptyComponent={
+            <Text style={styles.emptyChat}>No messages yet</Text>
+          }
         />
 
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
             placeholder="Type message..."
-            placeholderTextColor="#8C95A1"
+            placeholderTextColor="#64748B"
             value={message}
             onChangeText={setMessage}
           />
@@ -757,212 +789,473 @@ export default function BluetoothScreen() {
           </TouchableOpacity>
         </View>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
+
+const shadow3D = {
+  elevation: 14,
+  shadowColor: "#000",
+  shadowOpacity: 0.45,
+  shadowRadius: 18,
+  shadowOffset: { width: 0, height: 10 },
+};
+
+const neonShadow = {
+  elevation: 16,
+  shadowColor: "#00F5FF",
+  shadowOpacity: 0.28,
+  shadowRadius: 20,
+  shadowOffset: { width: 0, height: 10 },
+};
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#050B12",
-    padding: 18,
+    backgroundColor: "#020617",
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 14,
+    overflow: "hidden",
   },
-  title: {
-    color: "#fff",
-    fontSize: 26,
+
+  glowOne: {
+    position: "absolute",
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: "#0EA5E9",
+    opacity: 0.12,
+    top: -90,
+    right: -80,
+  },
+
+  glowTwo: {
+    position: "absolute",
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: "#22C55E",
+    opacity: 0.1,
+    bottom: 150,
+    left: -100,
+  },
+
+  headerCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 30,
+    padding: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    ...neonShadow,
+  },
+
+  appLabel: {
+    color: "#38BDF8",
+    fontSize: 11,
     fontWeight: "900",
-    marginTop: 45,
+    letterSpacing: 1.5,
+    marginBottom: 8,
+  },
+
+  title: {
+    color: "#F8FAFC",
+    fontSize: 31,
+    fontWeight: "900",
+    letterSpacing: 0.4,
+  },
+
+  subtitle: {
+    color: "#94A3B8",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 5,
+  },
+
+  nodeBox: {
+    width: 74,
+    height: 74,
+    borderRadius: 24,
+    backgroundColor: "#042F2E",
+    borderWidth: 1,
+    borderColor: "#2DD4BF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  nodeCount: {
+    color: "#5EEAD4",
+    fontSize: 25,
+    fontWeight: "900",
+  },
+
+  nodeText: {
+    color: "#CCFBF1",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+
+  actionPanel: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 16,
+  },
+
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 15,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    ...shadow3D,
+  },
+
+  receiveBtn: {
+    backgroundColor: "#064E3B",
+    borderColor: "#10B981",
+  },
+
+  stopBtn: {
+    backgroundColor: "#7F1D1D",
+    borderColor: "#FB7185",
+  },
+
+  scanBtn: {
+    backgroundColor: "#082F49",
+    borderColor: "#38BDF8",
+  },
+
+  actionIcon: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  actionText: {
+    color: "#F8FAFC",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  disabledBtn: {
+    opacity: 0.55,
+  },
+
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+
+  sectionTitle: {
+    color: "#E5E7EB",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  sectionMeta: {
+    color: "#64748B",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  chipList: {
+    maxHeight: 48,
+    marginBottom: 8,
+  },
+
+  connectedChip: {
+    backgroundColor: "#111827",
+    borderColor: "#334155",
+    borderWidth: 1,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    borderRadius: 999,
+    marginRight: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+
+  activeChip: {
+    backgroundColor: "#052E2B",
+    borderColor: "#5EEAD4",
+  },
+
+  chipDot: {
+    color: "#22C55E",
+    fontSize: 10,
+  },
+
+  chipText: {
+    color: "#F8FAFC",
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  deviceList: {
+    maxHeight: 205,
+    marginBottom: 8,
+  },
+
+  deviceCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 24,
+    padding: 14,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    ...shadow3D,
+  },
+
+  selectedCard: {
+    borderColor: "#5EEAD4",
+    backgroundColor: "#10231F",
+  },
+
+  deviceIconBox: {
+    width: 46,
+    height: 46,
+    borderRadius: 17,
+    backgroundColor: "#020617",
+    borderWidth: 1,
+    borderColor: "#334155",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  deviceIcon: {
+    color: "#38BDF8",
+    fontSize: 24,
+    fontWeight: "900",
+  },
+
+  deviceInfo: {
+    flex: 1,
+  },
+
+  name: {
+    color: "#F8FAFC",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  address: {
+    color: "#94A3B8",
+    fontSize: 11,
+    marginTop: 4,
+    fontWeight: "700",
+  },
+
+  online: {
+    color: "#5EEAD4",
+    fontWeight: "900",
+    marginTop: 6,
+    fontSize: 12,
+  },
+
+  offline: {
+    color: "#FBBF24",
+    fontWeight: "900",
+    marginTop: 6,
+    fontSize: 12,
+  },
+
+  connectBtn: {
+    backgroundColor: "#042F2E",
+    borderWidth: 1,
+    borderColor: "#2DD4BF",
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 999,
+  },
+
+  connectedBtn: {
+    opacity: 0.65,
+  },
+
+  connectBtnText: {
+    color: "#5EEAD4",
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  emptyCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 24,
+    padding: 22,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    alignItems: "center",
+  },
+
+  emptyIcon: {
+    color: "#334155",
+    fontSize: 30,
     marginBottom: 6,
   },
-  status: {
-    color: "#00E676",
-    fontWeight: "800",
-    marginBottom: 14,
-  },
-  modeRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginBottom: 12,
-  },
-  receiveBtn: {
-    flex: 1,
-    backgroundColor: "#0B6B3A",
-    padding: 14,
-    borderRadius: 25,
-    alignItems: "center",
-  },
-  stopBtn: {
-    backgroundColor: "#B91C1C",
-  },
-  sendModeBtn: {
-    flex: 1,
-    backgroundColor: "#064E8A",
-    padding: 14,
-    borderRadius: 25,
-    alignItems: "center",
-  },
-  modeText: {
-    color: "#fff",
-    fontWeight: "900",
-    fontSize: 13,
-  },
-  disabledBtn: {
-    opacity: 0.6,
-  },
-  connectedChip: {
-    backgroundColor: "#0B1622",
-    borderColor: "#1E293B",
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginRight: 8,
-    marginBottom: 10,
-  },
-  activeChip: {
-    borderColor: "#00E676",
-    backgroundColor: "#063D24",
-  },
-  chipText: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 12,
-  },
-  deviceList: {
-    maxHeight: 190,
-  },
-  card: {
-    backgroundColor: "#0B1622",
-    borderRadius: 15,
-    padding: 14,
-    marginBottom: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#0B1622",
-  },
-  selectedCard: {
-    borderColor: "#00E676",
-  },
-  name: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  address: {
-    color: "#8C95A1",
-    fontSize: 12,
-    marginTop: 4,
-  },
-  online: {
-    color: "#00E676",
-    fontWeight: "800",
-    marginTop: 5,
-    fontSize: 12,
-  },
-  offline: {
-    color: "#FFB020",
-    fontWeight: "800",
-    marginTop: 5,
-    fontSize: 12,
-  },
-  btn: {
-    backgroundColor: "#122D22",
-    paddingVertical: 9,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-  },
-  connectedBtn: {
-    opacity: 0.7,
-  },
-  btnText: {
-    color: "#00E676",
-    fontWeight: "800",
-  },
+
   empty: {
-    color: "#8C95A1",
+    color: "#64748B",
     textAlign: "center",
-    marginTop: 25,
+    fontWeight: "800",
   },
+
   emptySmall: {
-    color: "#8C95A1",
+    color: "#64748B",
+    fontWeight: "800",
     marginBottom: 10,
   },
+
   sosBtn: {
-    backgroundColor: "#EF4444",
-    padding: 14,
+    backgroundColor: "#881337",
+    paddingVertical: 15,
     borderRadius: 25,
     alignItems: "center",
     marginBottom: 12,
-    marginTop: 5,
+    borderWidth: 1,
+    borderColor: "#FB7185",
+    ...shadow3D,
   },
+
   sosText: {
-    color: "#fff",
+    color: "#FFFFFF",
     fontWeight: "900",
     fontSize: 15,
+    letterSpacing: 0.3,
   },
+
   chatBox: {
-    backgroundColor: "#0B1622",
-    borderRadius: 16,
-    padding: 12,
+    backgroundColor: "#0F172A",
+    borderRadius: 30,
+    padding: 14,
     flex: 1,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    ...shadow3D,
   },
+
+  chatHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+
+  chatTitle: {
+    color: "#F8FAFC",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
   connectedText: {
-    color: "#00E676",
+    color: "#5EEAD4",
     fontWeight: "800",
-    marginBottom: 10,
+    fontSize: 12,
+    marginTop: 3,
   },
+
+  chatBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 14,
+    backgroundColor: "#020617",
+    borderWidth: 1,
+    borderColor: "#334155",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  chatBadgeText: {
+    color: "#38BDF8",
+    fontWeight: "900",
+  },
+
   messageBubble: {
     alignSelf: "flex-end",
-    backgroundColor: "#00E676",
-    padding: 10,
-    borderRadius: 14,
-    marginBottom: 8,
-    maxWidth: "80%",
+    backgroundColor: "#5EEAD4",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderTopRightRadius: 6,
+    marginBottom: 9,
+    maxWidth: "82%",
   },
+
   receivedBubble: {
     alignSelf: "flex-start",
     backgroundColor: "#1E293B",
+    borderTopLeftRadius: 6,
   },
+
   messageText: {
-    color: "#04110A",
-    fontWeight: "700",
+    color: "#022C22",
+    fontWeight: "800",
+    fontSize: 13,
   },
+
   receivedText: {
-    color: "#fff",
+    color: "#F8FAFC",
   },
+
+  emptyChat: {
+    color: "#64748B",
+    textAlign: "center",
+    marginTop: 35,
+    fontWeight: "800",
+  },
+
   inputRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 12,
     gap: 8,
   },
+
   input: {
     flex: 1,
-    backgroundColor: "#050B12",
-    color: "#fff",
-    borderRadius: 22,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    backgroundColor: "#020617",
+    color: "#F8FAFC",
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: "#334155",
+    fontWeight: "700",
   },
+
   sendBtn: {
-    backgroundColor: "#00E676",
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 22,
+    backgroundColor: "#5EEAD4",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 999,
   },
+
   sendText: {
-    color: "#04110A",
+    color: "#022C22",
     fontWeight: "900",
   },
+
   broadcastBtn: {
     backgroundColor: "#2563EB",
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 999,
   },
+
   broadcastText: {
-    color: "#fff",
+    color: "#FFFFFF",
     fontWeight: "900",
   },
 });
