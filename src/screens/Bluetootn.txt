@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState } from "react";
 import {
   View,
@@ -9,16 +10,19 @@ import {
   Platform,
   Alert,
   TextInput,
-  ScrollView,
+  SafeAreaView,
 } from "react-native";
 
+import { useTheme } from "../context/ThemeContext";
+import Icon from "react-native-vector-icons/Ionicons";
 import RNBluetoothClassic from "react-native-bluetooth-classic";
 import GetLocation from "react-native-get-location";
 
 const HEARTBEAT_INTERVAL = 5000;
 const DEAD_TIMEOUT = 30000;
 
-export default function BluetoothScreen() {
+export default function BluetoothScreen({ navigation }) {
+  const {  colors } = useTheme();
   const [devices, setDevices] = useState([]);
   const [connectedDevices, setConnectedDevices] = useState([]);
   const [selectedDevice, setSelectedDevice] = useState(null);
@@ -42,14 +46,8 @@ export default function BluetoothScreen() {
   useEffect(() => {
     return () => {
       receiveLoopRef.current = false;
-
-      Object.values(subscriptionsRef.current).forEach(sub => {
-        sub?.remove?.();
-      });
-
-      if (heartbeatRef.current) {
-        clearInterval(heartbeatRef.current);
-      }
+      Object.values(subscriptionsRef.current).forEach(sub => sub?.remove?.());
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
     };
   }, []);
 
@@ -67,8 +65,6 @@ export default function BluetoothScreen() {
           : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
 
       const result = await PermissionsAndroid.requestMultiple(permissions);
-
-      console.log("PERMISSION RESULT:", result);
 
       return permissions.every(
         permission => result[permission] === PermissionsAndroid.RESULTS.GRANTED
@@ -112,8 +108,6 @@ export default function BluetoothScreen() {
   };
 
   const removeConnectedDevice = address => {
-    console.log("REMOVE DEVICE:", address);
-
     subscriptionsRef.current[address]?.remove?.();
     delete subscriptionsRef.current[address];
     delete savedDevicesRef.current[address];
@@ -139,10 +133,7 @@ export default function BluetoothScreen() {
 
       const isConnected = await device.isConnected();
 
-      if (!isConnected) {
-        console.log("DEVICE NOT CONNECTED:", device.name || device.address);
-        return false;
-      }
+      if (!isConnected) return false;
 
       await device.write(JSON.stringify(packet) + "\n");
 
@@ -151,7 +142,7 @@ export default function BluetoothScreen() {
 
       return true;
     } catch (error) {
-      console.log("SEND TO DEVICE ERROR:", error);
+      console.log("SEND ERROR:", error);
       return false;
     }
   };
@@ -161,17 +152,12 @@ export default function BluetoothScreen() {
       d => d.address !== senderAddress
     );
 
-    console.log("RELAY TARGETS:", targets.length);
-
     for (const device of targets) {
-      const ok = await sendToDevice(device, packet);
-      console.log("RELAY RESULT:", device.name || device.address, ok);
+      await sendToDevice(device, packet);
     }
   };
 
   const handleIncomingMessage = async (rawMessage, senderDevice) => {
-    console.log("RAW RECEIVED:", rawMessage);
-
     try {
       const packet = JSON.parse(rawMessage);
 
@@ -180,37 +166,25 @@ export default function BluetoothScreen() {
       }
 
       if (packet.type === "PING") {
-        const pongPacket = {
+        await sendToDevice(senderDevice, {
           id: `pong-${Date.now()}-${Math.random()}`,
           type: "PONG",
           from: "Me",
           time: Date.now(),
-        };
-
-        await sendToDevice(senderDevice, pongPacket);
-        console.log("PONG SENT");
+        });
         return;
       }
 
-      if (packet.type === "PONG") {
-        console.log("PONG RECEIVED");
-        return;
-      }
+      if (packet.type === "PONG") return;
 
       if (packet.type === "ACK") {
         console.log("DELIVERY CONFIRMED:", packet.ackId);
         return;
       }
 
-      if (!packet.id || !packet.text) {
-        console.log("INVALID PACKET:", packet);
-        return;
-      }
+      if (!packet.id || !packet.text) return;
 
-      if (seenMessagesRef.current.has(packet.id)) {
-        console.log("DUPLICATE IGNORED:", packet.id);
-        return;
-      }
+      if (seenMessagesRef.current.has(packet.id)) return;
 
       seenMessagesRef.current.add(packet.id);
 
@@ -223,22 +197,18 @@ export default function BluetoothScreen() {
         },
       ]);
 
-      const ackPacket = {
+      await sendToDevice(senderDevice, {
         id: `ack-${Date.now()}-${Math.random()}`,
         type: "ACK",
         ackId: packet.id,
         from: "Receiver",
         text: "DELIVERED",
-      };
-
-      await sendToDevice(senderDevice, ackPacket);
+      });
 
       if (packet.relay !== false) {
         await relayPacket(packet, senderDevice?.address);
       }
     } catch (error) {
-      console.log("PARSE ERROR:", error);
-
       setChat(prev => [
         ...prev,
         {
@@ -260,20 +230,14 @@ export default function BluetoothScreen() {
 
       subscriptionsRef.current[device.address] = device.onDataReceived(event => {
         const data = event?.data;
-
         if (!data) return;
 
-        const messages = data
+        data
           .split("\n")
           .map(item => item.trim())
-          .filter(Boolean);
-
-        messages.forEach(msg => {
-          handleIncomingMessage(msg, device);
-        });
+          .filter(Boolean)
+          .forEach(msg => handleIncomingMessage(msg, device));
       });
-
-      console.log("LISTENER STARTED:", device.name || device.address);
     } catch (error) {
       console.log("READ ERROR:", error);
     }
@@ -290,27 +254,18 @@ export default function BluetoothScreen() {
           const isConnected = await device.isConnected();
           const lastSeen = lastSeenRef.current[device.address] || 0;
 
-          console.log("HEARTBEAT:", {
-            device: device.name || device.address,
-            isConnected,
-            lastSeenAgo: now - lastSeen,
-          });
-
           if (!isConnected || now - lastSeen > DEAD_TIMEOUT) {
             removeConnectedDevice(device.address);
             continue;
           }
 
-          const pingPacket = {
+          await sendToDevice(device, {
             id: `ping-${Date.now()}-${Math.random()}`,
             type: "PING",
             from: "Me",
             time: Date.now(),
-          };
-
-          await sendToDevice(device, pingPacket);
+          });
         } catch (error) {
-          console.log("HEARTBEAT ERROR:", error);
           removeConnectedDevice(device.address);
         }
       }
@@ -330,52 +285,40 @@ export default function BluetoothScreen() {
       receiveLoopRef.current = true;
       setReceiving(true);
 
-      Alert.alert(
-        "Receive Mode ON",
-        "Ab naye devices is phone se connect ho sakte hain."
-      );
+      Alert.alert("Receive Mode ON", "Ab naye devices connect ho sakte hain.");
 
       while (receiveLoopRef.current) {
+        let device = null;
+
         try {
-          console.log("WAITING FOR NEW DEVICE...");
+          device = await RNBluetoothClassic.accept({
+            delimiter: "\n",
+            secureSocket: true,
+            timeout: 120000,
+          });
+        } catch (e) {
+          console.log("SECURE ACCEPT FAILED:", e);
+        }
 
-          let device = null;
-
+        if (!device) {
           try {
             device = await RNBluetoothClassic.accept({
               delimiter: "\n",
-              secureSocket: true,
+              secureSocket: false,
               timeout: 120000,
             });
           } catch (e) {
-            console.log("SECURE ACCEPT FAILED:", e);
+            console.log("INSECURE ACCEPT FAILED:", e);
           }
+        }
 
-          if (!device) {
-            try {
-              device = await RNBluetoothClassic.accept({
-                delimiter: "\n",
-                secureSocket: false,
-                timeout: 120000,
-              });
-            } catch (e) {
-              console.log("INSECURE ACCEPT FAILED:", e);
-            }
-          }
-
-          if (device?.address) {
-            console.log("NEW DEVICE CONNECTED:", device.name, device.address);
-
-            addConnectedDevice(device);
-            startReadingMessages(device);
-            startHeartbeat();
-          }
-        } catch (error) {
-          console.log("ACCEPT LOOP ERROR:", error);
+        if (device?.address) {
+          addConnectedDevice(device);
+          startReadingMessages(device);
+          startHeartbeat();
         }
       }
     } catch (error) {
-      console.log("RECEIVE MODE ERROR:", error);
       Alert.alert("Receive Error", String(error?.message || error));
     } finally {
       setReceiving(false);
@@ -416,7 +359,6 @@ export default function BluetoothScreen() {
       setScanning(false);
     } catch (error) {
       setScanning(false);
-      console.log("SCAN ERROR:", error);
       Alert.alert("Bluetooth Error", String(error?.message || error));
     }
   };
@@ -468,7 +410,6 @@ export default function BluetoothScreen() {
 
       Alert.alert("Connected", `${device.name || "Device"} connected successfully.`);
     } catch (error) {
-      console.log("CONNECT ERROR:", error);
       Alert.alert("Connect Error", String(error?.message || error));
     }
   };
@@ -549,13 +490,6 @@ export default function BluetoothScreen() {
     ]);
 
     setMessage("");
-
-    if (successCount === 0) {
-      Alert.alert(
-        "Broadcast Failed",
-        "Koi active socket nahi mila. Receiver phone par Receive Mode ON rakho."
-      );
-    }
   };
 
   const sendSOSMessage = async () => {
@@ -603,7 +537,6 @@ export default function BluetoothScreen() {
 
       Alert.alert("SOS Sent", `SOS ${successCount}/${targets.length} devices par send hua.`);
     } catch (error) {
-      console.log("SOS ERROR:", error);
       Alert.alert("Location Error", "GPS ON karo aur location permission allow karo.");
     }
   };
@@ -613,9 +546,13 @@ export default function BluetoothScreen() {
     const isSelected = selectedDevice?.address === item.address;
 
     return (
-      <View style={[styles.card, isSelected && styles.selectedCard]}>
+      <View style={[styles.deviceCard, isSelected && styles.selectedCard]}>
+        <View style={styles.deviceIconBox}>
+          <Text style={styles.deviceIcon}>⌁</Text>
+        </View>
+
         <TouchableOpacity
-          style={{ flex: 1 }}
+          style={styles.deviceInfo}
           onPress={() => {
             if (isConnected) setSelectedDevice(item);
           }}
@@ -628,12 +565,12 @@ export default function BluetoothScreen() {
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.btn, isConnected && styles.connectedBtn]}
+          style={[styles.connectBtn, isConnected && styles.connectedBtn]}
           onPress={() => connectDevice(item)}
           disabled={isConnected}
         >
-          <Text style={styles.btnText}>
-            {isConnected ? "Connected" : "Connect"}
+          <Text style={styles.connectBtnText}>
+            {isConnected ? "Linked" : "Link"}
           </Text>
         </TouchableOpacity>
       </View>
@@ -648,41 +585,60 @@ export default function BluetoothScreen() {
         style={[styles.connectedChip, isSelected && styles.activeChip]}
         onPress={() => setSelectedDevice(item)}
       >
-        <Text style={styles.chipText}>
-          {isSelected ? "✓ " : ""}
-          {item.name || "Device"}
-        </Text>
+        <Text style={styles.chipDot}>●</Text>
+        <Text style={styles.chipText}>{item.name || "Device"}</Text>
       </TouchableOpacity>
     );
   };
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Bluetooth Mesh Relay</Text>
+    <SafeAreaView   style={[
+    styles.container,
+    { backgroundColor: colors.bg }
+  ]}
+>
+      <View style={styles.glowOne} />
+      <View style={styles.glowTwo} />
 
-      <Text style={styles.status}>
-        Active Relay Devices: {connectedDevices.length}
-      </Text>
+      <View style={styles.headerCard}>
+        <View>
+          <Text style={styles.appLabel}>OFFLINE BLUETOOTH MESH</Text>
+          <Text style={styles.title}>Mesh Relay</Text>
+          <Text style={styles.subtitle}>Secure device-to-device communication</Text>
+        </View>
 
-      <View style={styles.modeRow}>
+        <View style={styles.nodeBox}>
+          <Text style={styles.nodeCount}>{connectedDevices.length}</Text>
+          <Text style={styles.nodeText}>Nodes</Text>
+        </View>
+      </View>
+
+      <View style={styles.actionPanel}>
         <TouchableOpacity
-          style={[styles.receiveBtn, receiving && styles.stopBtn]}
+          style={[styles.actionBtn, styles.receiveBtn, receiving && styles.stopBtn]}
           onPress={receiving ? stopReceiveMode : startReceiveMode}
         >
-          <Text style={styles.modeText}>
+          <Text style={styles.actionIcon}>{receiving ? "■" : "◉"}</Text>
+          <Text style={styles.actionText}>
             {receiving ? "Stop Receive" : "Receive Mode"}
           </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
-          style={[styles.sendModeBtn, scanning && styles.disabledBtn]}
+          style={[styles.actionBtn, styles.scanBtn, scanning && styles.disabledBtn]}
           onPress={startScan}
           disabled={scanning}
         >
-          <Text style={styles.modeText}>
+          <Text style={styles.actionIcon}>⌕</Text>
+          <Text style={styles.actionText}>
             {scanning ? "Scanning..." : "Scan New"}
           </Text>
         </TouchableOpacity>
+      </View>
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Active Relay Nodes</Text>
+        <Text style={styles.sectionMeta}>{connectedDevices.length} online</Text>
       </View>
 
       <FlatList
@@ -691,18 +647,26 @@ export default function BluetoothScreen() {
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderConnectedDevice}
         showsHorizontalScrollIndicator={false}
-        ListEmptyComponent={
-          <Text style={styles.emptySmall}>No active relay device</Text>
-        }
+        style={styles.chipList}
+        ListEmptyComponent={<Text style={styles.emptySmall}>No active relay device</Text>}
       />
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Available Devices</Text>
+        <Text style={styles.sectionMeta}>Bluetooth scan</Text>
+      </View>
 
       <FlatList
         data={devices}
         keyExtractor={(item, index) => item.address || String(index)}
         renderItem={renderDevice}
         style={styles.deviceList}
+        showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>⌁</Text>
+            <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+          </View>
         }
       />
 
@@ -711,15 +675,25 @@ export default function BluetoothScreen() {
       </TouchableOpacity>
 
       <View style={styles.chatBox}>
-        <Text style={styles.connectedText}>
-          {selectedDevice
-            ? `Selected: ${selectedDevice.name || "Device"}`
-            : "No selected device"}
-        </Text>
+        <View style={styles.chatHeader}>
+          <View>
+            <Text style={styles.chatTitle}>Secure Chat</Text>
+            <Text style={styles.connectedText}>
+              {selectedDevice
+                ? `Selected: ${selectedDevice.name || "Device"}`
+                : "No selected device"}
+            </Text>
+          </View>
+
+          <View style={styles.chatBadge}>
+            <Text style={styles.chatBadgeText}>{chat.length}</Text>
+          </View>
+        </View>
 
         <FlatList
           data={chat}
           keyExtractor={item => item.id}
+          showsVerticalScrollIndicator={false}
           renderItem={({ item }) => (
             <View
               style={[
@@ -737,13 +711,14 @@ export default function BluetoothScreen() {
               </Text>
             </View>
           )}
+          ListEmptyComponent={<Text style={styles.emptyChat}>No messages yet</Text>}
         />
 
         <View style={styles.inputRow}>
           <TextInput
             style={styles.input}
             placeholder="Type message..."
-            placeholderTextColor="#8C95A1"
+            placeholderTextColor="#64748B"
             value={message}
             onChangeText={setMessage}
           />
@@ -757,212 +732,1894 @@ export default function BluetoothScreen() {
           </TouchableOpacity>
         </View>
       </View>
-    </View>
+
+     <View style={styles.bottomNavWrapper}>
+  <View style={styles.bottomNav}>
+    <TouchableOpacity style={styles.navItem}>
+      <Text style={[styles.navIcon, styles.activeNavIcon]}>⌂</Text>
+      <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
+    </TouchableOpacity>
+
+    <TouchableOpacity style={styles.navItem}>
+      <Text style={styles.navIcon}>🗺</Text>
+      <Text style={styles.navText}>Map</Text>
+    </TouchableOpacity>
+
+    <TouchableOpacity style={styles.navItem}>
+      <Text style={styles.navIcon}>◎</Text>
+      <Text style={styles.navText}>Nodes</Text>
+    </TouchableOpacity>
+
+    <TouchableOpacity style={styles.navItem} onPress={() => navigation.navigate("Settings")}>
+      <Text style={styles.navIcon}>⚙</Text>
+      <Text style={styles.navText} 
+      >Settings</Text>
+    </TouchableOpacity>
+  </View>
+</View>
+    </SafeAreaView>
   );
 }
+
+const shadow3D = {
+  elevation: 14,
+  shadowColor: "#000",
+  shadowOpacity: 0.45,
+  shadowRadius: 18,
+  shadowOffset: { width: 0, height: 10 },
+};
+
+const neonShadow = {
+  elevation: 16,
+  shadowColor: "#00F5FF",
+  shadowOpacity: 0.28,
+  shadowRadius: 20,
+  shadowOffset: { width: 0, height: 10 },
+};
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#050B12",
-    padding: 18,
+    backgroundColor: "#020617",
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 95,
+    overflow: "hidden",
   },
-  title: {
-    color: "#fff",
-    fontSize: 26,
+
+  glowOne: {
+    position: "absolute",
+    width: 260,
+    height: 260,
+    borderRadius: 130,
+    backgroundColor: "#0EA5E9",
+    opacity: 0.12,
+    top: -90,
+    right: -80,
+  },
+
+  glowTwo: {
+    position: "absolute",
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: "#22C55E",
+    opacity: 0.1,
+    bottom: 150,
+    left: -100,
+  },
+
+  headerCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 30,
+    padding: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    ...neonShadow,
+  },
+
+  appLabel: {
+    color: "#38BDF8",
+    fontSize: 11,
     fontWeight: "900",
-    marginTop: 45,
+    letterSpacing: 1.5,
+    marginBottom: 8,
+  },
+
+  title: {
+    color: "#F8FAFC",
+    fontSize: 31,
+    fontWeight: "900",
+  },
+
+  subtitle: {
+    color: "#94A3B8",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 5,
+  },
+
+  nodeBox: {
+    width: 74,
+    height: 74,
+    borderRadius: 24,
+    backgroundColor: "#042F2E",
+    borderWidth: 1,
+    borderColor: "#2DD4BF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  nodeCount: {
+    color: "#5EEAD4",
+    fontSize: 25,
+    fontWeight: "900",
+  },
+
+  nodeText: {
+    color: "#CCFBF1",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+
+  actionPanel: {
+    flexDirection: "row",
+    gap: 12,
+    marginBottom: 16,
+  },
+
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 15,
+    borderRadius: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 7,
+    ...shadow3D,
+  },
+
+  receiveBtn: {
+    backgroundColor: "#064E3B",
+    borderColor: "#10B981",
+  },
+
+  stopBtn: {
+    backgroundColor: "#7F1D1D",
+    borderColor: "#FB7185",
+  },
+
+  scanBtn: {
+    backgroundColor: "#082F49",
+    borderColor: "#38BDF8",
+  },
+
+  actionIcon: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  actionText: {
+    color: "#F8FAFC",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  disabledBtn: {
+    opacity: 0.55,
+  },
+
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+
+  sectionTitle: {
+    color: "#E5E7EB",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  sectionMeta: {
+    color: "#64748B",
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  chipList: {
+    maxHeight: 48,
+    marginBottom: 8,
+  },
+
+  connectedChip: {
+    backgroundColor: "#111827",
+    borderColor: "#334155",
+    borderWidth: 1,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    borderRadius: 999,
+    marginRight: 9,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+
+  activeChip: {
+    backgroundColor: "#052E2B",
+    borderColor: "#5EEAD4",
+  },
+
+  chipDot: {
+    color: "#22C55E",
+    fontSize: 10,
+  },
+
+  chipText: {
+    color: "#F8FAFC",
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  deviceList: {
+    maxHeight: 205,
+    marginBottom: 8,
+  },
+
+  deviceCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 24,
+    padding: 14,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    ...shadow3D,
+  },
+
+  selectedCard: {
+    borderColor: "#5EEAD4",
+    backgroundColor: "#10231F",
+  },
+
+  deviceIconBox: {
+    width: 46,
+    height: 46,
+    borderRadius: 17,
+    backgroundColor: "#020617",
+    borderWidth: 1,
+    borderColor: "#334155",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+
+  deviceIcon: {
+    color: "#38BDF8",
+    fontSize: 24,
+    fontWeight: "900",
+  },
+
+  deviceInfo: {
+    flex: 1,
+  },
+
+  name: {
+    color: "#F8FAFC",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  address: {
+    color: "#94A3B8",
+    fontSize: 11,
+    marginTop: 4,
+    fontWeight: "700",
+  },
+
+  online: {
+    color: "#5EEAD4",
+    fontWeight: "900",
+    marginTop: 6,
+    fontSize: 12,
+  },
+
+  offline: {
+    color: "#FBBF24",
+    fontWeight: "900",
+    marginTop: 6,
+    fontSize: 12,
+  },
+
+  connectBtn: {
+    backgroundColor: "#042F2E",
+    borderWidth: 1,
+    borderColor: "#2DD4BF",
+    paddingVertical: 10,
+    paddingHorizontal: 15,
+    borderRadius: 999,
+  },
+
+  connectedBtn: {
+    opacity: 0.65,
+  },
+
+  connectBtnText: {
+    color: "#5EEAD4",
+    fontWeight: "900",
+    fontSize: 12,
+  },
+
+  emptyCard: {
+    backgroundColor: "#0F172A",
+    borderRadius: 24,
+    padding: 22,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    alignItems: "center",
+  },
+
+  emptyIcon: {
+    color: "#334155",
+    fontSize: 30,
     marginBottom: 6,
   },
-  status: {
-    color: "#00E676",
-    fontWeight: "800",
-    marginBottom: 14,
-  },
-  modeRow: {
-    flexDirection: "row",
-    gap: 10,
-    marginBottom: 12,
-  },
-  receiveBtn: {
-    flex: 1,
-    backgroundColor: "#0B6B3A",
-    padding: 14,
-    borderRadius: 25,
-    alignItems: "center",
-  },
-  stopBtn: {
-    backgroundColor: "#B91C1C",
-  },
-  sendModeBtn: {
-    flex: 1,
-    backgroundColor: "#064E8A",
-    padding: 14,
-    borderRadius: 25,
-    alignItems: "center",
-  },
-  modeText: {
-    color: "#fff",
-    fontWeight: "900",
-    fontSize: 13,
-  },
-  disabledBtn: {
-    opacity: 0.6,
-  },
-  connectedChip: {
-    backgroundColor: "#0B1622",
-    borderColor: "#1E293B",
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginRight: 8,
-    marginBottom: 10,
-  },
-  activeChip: {
-    borderColor: "#00E676",
-    backgroundColor: "#063D24",
-  },
-  chipText: {
-    color: "#fff",
-    fontWeight: "800",
-    fontSize: 12,
-  },
-  deviceList: {
-    maxHeight: 190,
-  },
-  card: {
-    backgroundColor: "#0B1622",
-    borderRadius: 15,
-    padding: 14,
-    marginBottom: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#0B1622",
-  },
-  selectedCard: {
-    borderColor: "#00E676",
-  },
-  name: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "800",
-  },
-  address: {
-    color: "#8C95A1",
-    fontSize: 12,
-    marginTop: 4,
-  },
-  online: {
-    color: "#00E676",
-    fontWeight: "800",
-    marginTop: 5,
-    fontSize: 12,
-  },
-  offline: {
-    color: "#FFB020",
-    fontWeight: "800",
-    marginTop: 5,
-    fontSize: 12,
-  },
-  btn: {
-    backgroundColor: "#122D22",
-    paddingVertical: 9,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-  },
-  connectedBtn: {
-    opacity: 0.7,
-  },
-  btnText: {
-    color: "#00E676",
-    fontWeight: "800",
-  },
+
   empty: {
-    color: "#8C95A1",
+    color: "#64748B",
     textAlign: "center",
-    marginTop: 25,
+    fontWeight: "800",
   },
+
   emptySmall: {
-    color: "#8C95A1",
+    color: "#64748B",
+    fontWeight: "800",
     marginBottom: 10,
   },
+
   sosBtn: {
-    backgroundColor: "#EF4444",
-    padding: 14,
+    backgroundColor: "#881337",
+    paddingVertical: 15,
     borderRadius: 25,
     alignItems: "center",
     marginBottom: 12,
-    marginTop: 5,
+    borderWidth: 1,
+    borderColor: "#FB7185",
+    ...shadow3D,
   },
+
   sosText: {
-    color: "#fff",
+    color: "#FFFFFF",
     fontWeight: "900",
     fontSize: 15,
   },
+
   chatBox: {
-    backgroundColor: "#0B1622",
-    borderRadius: 16,
-    padding: 12,
+    backgroundColor: "#0F172A",
+    borderRadius: 30,
+    padding: 14,
     flex: 1,
+    borderWidth: 1,
+    borderColor: "#1E293B",
+    ...shadow3D,
   },
+
+  chatHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+
+  chatTitle: {
+    color: "#F8FAFC",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
   connectedText: {
-    color: "#00E676",
+    color: "#5EEAD4",
     fontWeight: "800",
-    marginBottom: 10,
+    fontSize: 12,
+    marginTop: 3,
   },
+
+  chatBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 14,
+    backgroundColor: "#020617",
+    borderWidth: 1,
+    borderColor: "#334155",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  chatBadgeText: {
+    color: "#38BDF8",
+    fontWeight: "900",
+  },
+
   messageBubble: {
     alignSelf: "flex-end",
-    backgroundColor: "#00E676",
-    padding: 10,
-    borderRadius: 14,
-    marginBottom: 8,
-    maxWidth: "80%",
+    backgroundColor: "#5EEAD4",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderTopRightRadius: 6,
+    marginBottom: 9,
+    maxWidth: "82%",
   },
+
   receivedBubble: {
     alignSelf: "flex-start",
     backgroundColor: "#1E293B",
+    borderTopLeftRadius: 6,
   },
+
   messageText: {
-    color: "#04110A",
-    fontWeight: "700",
+    color: "#022C22",
+    fontWeight: "800",
+    fontSize: 13,
   },
+
   receivedText: {
-    color: "#fff",
+    color: "#F8FAFC",
   },
+
+  emptyChat: {
+    color: "#64748B",
+    textAlign: "center",
+    marginTop: 35,
+    fontWeight: "800",
+  },
+
   inputRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginTop: 10,
+    marginTop: 12,
     gap: 8,
   },
+
   input: {
     flex: 1,
-    backgroundColor: "#050B12",
-    color: "#fff",
-    borderRadius: 22,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    backgroundColor: "#020617",
+    color: "#F8FAFC",
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: "#334155",
+    fontWeight: "700",
   },
+
   sendBtn: {
-    backgroundColor: "#00E676",
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 22,
+    backgroundColor: "#5EEAD4",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 999,
   },
+
   sendText: {
-    color: "#04110A",
+    color: "#022C22",
     fontWeight: "900",
   },
+
   broadcastBtn: {
     backgroundColor: "#2563EB",
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 999,
   },
+
   broadcastText: {
-    color: "#fff",
+    color: "#FFFFFF",
     fontWeight: "900",
   },
+
+  bottomNavWrapper: {
+    position: "absolute",
+    bottom: 15,
+    left: 18,
+    right: 18,
+  },
+
+  bottomNav: {
+    height: 68,
+    backgroundColor: "rgba(7, 18, 37, 0.98)",
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: "rgba(56,189,248,0.18)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
+    paddingHorizontal: 8,
+    elevation: 24,
+    shadowColor: "#000",
+    shadowOpacity: 0.55,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 12 },
+  },
+
+  navItem: {
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 60,
+  },
+
+  activeIconBox: {
+    width: 34,
+    height: 34,
+    borderRadius: 14,
+    backgroundColor: "rgba(0,245,195,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(0,245,195,0.35)",
+  },
+
+  navText: {
+    color: "#94A3B8",
+    fontSize: 10,
+    marginTop: 3,
+    fontWeight: "800",
+  },
+
+  activeNavText: {
+    color: "#00F5C3",
+  },
+  navIcon: {
+  color: "#94A3B8",
+  fontSize: 22,
+  fontWeight: "900",
+},
+
+activeNavIcon: {
+  color: "#00F5C3",
+},
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// import React, { useEffect, useRef, useState } from "react";
+// import {
+//   View,
+//   Text,
+//   StyleSheet,
+//   TouchableOpacity,
+//   FlatList,
+//   PermissionsAndroid,
+//   Platform,
+//   Alert,
+//   TextInput,
+//   SafeAreaView,
+// } from "react-native";
+
+// import { useTheme } from "../context/ThemeContext";
+// import Icon from "react-native-vector-icons/Ionicons";
+// import RNBluetoothClassic from "react-native-bluetooth-classic";
+// import GetLocation from "react-native-get-location";
+
+// const HEARTBEAT_INTERVAL = 5000;
+// const DEAD_TIMEOUT = 30000;
+
+// export default function BluetoothScreen({ navigation }) {
+//   const {  colors } = useTheme();
+//   const [devices, setDevices] = useState([]);
+//   const [connectedDevices, setConnectedDevices] = useState([]);
+//   const [selectedDevice, setSelectedDevice] = useState(null);
+//   const [scanning, setScanning] = useState(false);
+//   const [receiving, setReceiving] = useState(false);
+//   const [message, setMessage] = useState("");
+//   const [chat, setChat] = useState([]);
+
+//   const subscriptionsRef = useRef({});
+//   const connectedDevicesRef = useRef([]);
+//   const savedDevicesRef = useRef({});
+//   const lastSeenRef = useRef({});
+//   const seenMessagesRef = useRef(new Set());
+//   const heartbeatRef = useRef(null);
+//   const receiveLoopRef = useRef(false);
+
+//   useEffect(() => {
+//     connectedDevicesRef.current = connectedDevices;
+//   }, [connectedDevices]);
+
+//   useEffect(() => {
+//     return () => {
+//       receiveLoopRef.current = false;
+//       Object.values(subscriptionsRef.current).forEach(sub => sub?.remove?.());
+//       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+//     };
+//   }, []);
+
+//   const requestPermissions = async () => {
+//     if (Platform.OS !== "android") return true;
+
+//     try {
+//       const permissions =
+//         Platform.Version >= 31
+//           ? [
+//               PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+//               PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+//               PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+//             ]
+//           : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+
+//       const result = await PermissionsAndroid.requestMultiple(permissions);
+
+//       return permissions.every(
+//         permission => result[permission] === PermissionsAndroid.RESULTS.GRANTED
+//       );
+//     } catch (error) {
+//       console.log("PERMISSION ERROR:", error);
+//       return false;
+//     }
+//   };
+
+//   const prepareBluetooth = async () => {
+//     const hasPermission = await requestPermissions();
+
+//     if (!hasPermission) {
+//       Alert.alert("Permission Required", "Bluetooth aur Location permission allow karo.");
+//       return false;
+//     }
+
+//     const enabled = await RNBluetoothClassic.isBluetoothEnabled();
+
+//     if (!enabled) {
+//       await RNBluetoothClassic.requestBluetoothEnabled();
+//     }
+
+//     return true;
+//   };
+
+//   const addConnectedDevice = device => {
+//     if (!device?.address) return;
+
+//     savedDevicesRef.current[device.address] = device;
+//     lastSeenRef.current[device.address] = Date.now();
+
+//     setSelectedDevice(prev => prev || device);
+
+//     setConnectedDevices(prev => {
+//       const exists = prev.find(d => d.address === device.address);
+//       if (exists) return prev;
+//       return [...prev, device];
+//     });
+//   };
+
+//   const removeConnectedDevice = address => {
+//     subscriptionsRef.current[address]?.remove?.();
+//     delete subscriptionsRef.current[address];
+//     delete savedDevicesRef.current[address];
+//     delete lastSeenRef.current[address];
+
+//     setConnectedDevices(prev => {
+//       const updated = prev.filter(d => d.address !== address);
+
+//       setSelectedDevice(current => {
+//         if (current?.address === address) {
+//           return updated[0] || null;
+//         }
+//         return current;
+//       });
+
+//       return updated;
+//     });
+//   };
+
+//   const sendToDevice = async (device, packet) => {
+//     try {
+//       if (!device?.address) return false;
+
+//       const isConnected = await device.isConnected();
+
+//       if (!isConnected) return false;
+
+//       await device.write(JSON.stringify(packet) + "\n");
+
+//       lastSeenRef.current[device.address] = Date.now();
+//       savedDevicesRef.current[device.address] = device;
+
+//       return true;
+//     } catch (error) {
+//       console.log("SEND ERROR:", error);
+//       return false;
+//     }
+//   };
+
+//   const relayPacket = async (packet, senderAddress) => {
+//     const targets = connectedDevicesRef.current.filter(
+//       d => d.address !== senderAddress
+//     );
+
+//     for (const device of targets) {
+//       await sendToDevice(device, packet);
+//     }
+//   };
+
+//   const handleIncomingMessage = async (rawMessage, senderDevice) => {
+//     try {
+//       const packet = JSON.parse(rawMessage);
+
+//       if (senderDevice?.address) {
+//         lastSeenRef.current[senderDevice.address] = Date.now();
+//       }
+
+//       if (packet.type === "PING") {
+//         await sendToDevice(senderDevice, {
+//           id: `pong-${Date.now()}-${Math.random()}`,
+//           type: "PONG",
+//           from: "Me",
+//           time: Date.now(),
+//         });
+//         return;
+//       }
+
+//       if (packet.type === "PONG") return;
+
+//       if (packet.type === "ACK") {
+//         console.log("DELIVERY CONFIRMED:", packet.ackId);
+//         return;
+//       }
+
+//       if (!packet.id || !packet.text) return;
+
+//       if (seenMessagesRef.current.has(packet.id)) return;
+
+//       seenMessagesRef.current.add(packet.id);
+
+//       setChat(prev => [
+//         ...prev,
+//         {
+//           id: packet.id,
+//           text: `[FROM ${packet.from || "Unknown"}] ${packet.text}`,
+//           type: "received",
+//         },
+//       ]);
+
+//       await sendToDevice(senderDevice, {
+//         id: `ack-${Date.now()}-${Math.random()}`,
+//         type: "ACK",
+//         ackId: packet.id,
+//         from: "Receiver",
+//         text: "DELIVERED",
+//       });
+
+//       if (packet.relay !== false) {
+//         await relayPacket(packet, senderDevice?.address);
+//       }
+//     } catch (error) {
+//       setChat(prev => [
+//         ...prev,
+//         {
+//           id: `raw-${Date.now()}-${Math.random()}`,
+//           text: rawMessage,
+//           type: "received",
+//         },
+//       ]);
+//     }
+//   };
+
+//   const startReadingMessages = device => {
+//     try {
+//       if (!device?.address) return;
+
+//       if (subscriptionsRef.current[device.address]) {
+//         subscriptionsRef.current[device.address]?.remove?.();
+//       }
+
+//       subscriptionsRef.current[device.address] = device.onDataReceived(event => {
+//         const data = event?.data;
+//         if (!data) return;
+
+//         data
+//           .split("\n")
+//           .map(item => item.trim())
+//           .filter(Boolean)
+//           .forEach(msg => handleIncomingMessage(msg, device));
+//       });
+//     } catch (error) {
+//       console.log("READ ERROR:", error);
+//     }
+//   };
+
+//   const startHeartbeat = () => {
+//     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+
+//     heartbeatRef.current = setInterval(async () => {
+//       const now = Date.now();
+
+//       for (const device of connectedDevicesRef.current) {
+//         try {
+//           const isConnected = await device.isConnected();
+//           const lastSeen = lastSeenRef.current[device.address] || 0;
+
+//           if (!isConnected || now - lastSeen > DEAD_TIMEOUT) {
+//             removeConnectedDevice(device.address);
+//             continue;
+//           }
+
+//           await sendToDevice(device, {
+//             id: `ping-${Date.now()}-${Math.random()}`,
+//             type: "PING",
+//             from: "Me",
+//             time: Date.now(),
+//           });
+//         } catch (error) {
+//           removeConnectedDevice(device.address);
+//         }
+//       }
+//     }, HEARTBEAT_INTERVAL);
+//   };
+
+//   const startReceiveMode = async () => {
+//     try {
+//       const ready = await prepareBluetooth();
+//       if (!ready) return;
+
+//       if (receiveLoopRef.current) {
+//         Alert.alert("Already Running", "Receive mode already ON hai.");
+//         return;
+//       }
+
+//       receiveLoopRef.current = true;
+//       setReceiving(true);
+
+//       Alert.alert("Receive Mode ON", "Ab naye devices connect ho sakte hain.");
+
+//       while (receiveLoopRef.current) {
+//         let device = null;
+
+//         try {
+//           device = await RNBluetoothClassic.accept({
+//             delimiter: "\n",
+//             secureSocket: true,
+//             timeout: 120000,
+//           });
+//         } catch (e) {
+//           console.log("SECURE ACCEPT FAILED:", e);
+//         }
+
+//         if (!device) {
+//           try {
+//             device = await RNBluetoothClassic.accept({
+//               delimiter: "\n",
+//               secureSocket: false,
+//               timeout: 120000,
+//             });
+//           } catch (e) {
+//             console.log("INSECURE ACCEPT FAILED:", e);
+//           }
+//         }
+
+//         if (device?.address) {
+//           addConnectedDevice(device);
+//           startReadingMessages(device);
+//           startHeartbeat();
+//         }
+//       }
+//     } catch (error) {
+//       Alert.alert("Receive Error", String(error?.message || error));
+//     } finally {
+//       setReceiving(false);
+//     }
+//   };
+
+//   const stopReceiveMode = () => {
+//     receiveLoopRef.current = false;
+//     setReceiving(false);
+//     Alert.alert("Receive Mode OFF", "Naye devices accept hona band ho jayega.");
+//   };
+
+//   const startScan = async () => {
+//     try {
+//       const ready = await prepareBluetooth();
+//       if (!ready) return;
+
+//       setScanning(true);
+
+//       const bonded = await RNBluetoothClassic.getBondedDevices();
+
+//       let discovered = [];
+//       try {
+//         discovered = await RNBluetoothClassic.startDiscovery();
+//       } catch (e) {
+//         console.log("DISCOVERY ERROR:", e);
+//       }
+
+//       const allDevices = [...bonded, ...discovered];
+
+//       const uniqueDevices = allDevices.filter(
+//         (device, index, self) =>
+//           device?.address &&
+//           index === self.findIndex(d => d.address === device.address)
+//       );
+
+//       setDevices(uniqueDevices);
+//       setScanning(false);
+//     } catch (error) {
+//       setScanning(false);
+//       Alert.alert("Bluetooth Error", String(error?.message || error));
+//     }
+//   };
+
+//   const connectDevice = async device => {
+//     try {
+//       if (!device?.address) return;
+
+//       const alreadyConnected = connectedDevicesRef.current.some(
+//         d => d.address === device.address
+//       );
+
+//       if (alreadyConnected) {
+//         setSelectedDevice(device);
+//         Alert.alert("Already Connected", `${device.name || "Device"} already connected hai.`);
+//         return;
+//       }
+
+//       let connected = false;
+
+//       try {
+//         connected = await device.connect({
+//           delimiter: "\n",
+//           secureSocket: true,
+//         });
+//       } catch (e) {
+//         console.log("SECURE CONNECT FAILED:", e);
+//       }
+
+//       if (!connected) {
+//         try {
+//           connected = await device.connect({
+//             delimiter: "\n",
+//             secureSocket: false,
+//           });
+//         } catch (e) {
+//           console.log("INSECURE CONNECT FAILED:", e);
+//         }
+//       }
+
+//       if (!connected) {
+//         Alert.alert("Connection Failed", "Device connect nahi hua.");
+//         return;
+//       }
+
+//       addConnectedDevice(device);
+//       startReadingMessages(device);
+//       startHeartbeat();
+
+//       Alert.alert("Connected", `${device.name || "Device"} connected successfully.`);
+//     } catch (error) {
+//       Alert.alert("Connect Error", String(error?.message || error));
+//     }
+//   };
+
+//   const sendSingleMessage = async () => {
+//     if (!selectedDevice) {
+//       Alert.alert("No Device", "Pehle kisi connected device ko select karo.");
+//       return;
+//     }
+
+//     if (!message.trim()) return;
+
+//     const packet = {
+//       id: `msg-${Date.now()}-${Math.random()}`,
+//       type: "MESSAGE",
+//       from: "Me",
+//       text: message.trim(),
+//       relay: false,
+//       time: Date.now(),
+//     };
+
+//     seenMessagesRef.current.add(packet.id);
+
+//     const ok = await sendToDevice(selectedDevice, packet);
+
+//     if (!ok) {
+//       Alert.alert("Send Failed", "Selected device connected nahi hai.");
+//       return;
+//     }
+
+//     setChat(prev => [
+//       ...prev,
+//       {
+//         id: packet.id,
+//         text: `[SENT TO ${selectedDevice.name || "Device"}] ${packet.text}`,
+//         type: "sent",
+//       },
+//     ]);
+
+//     setMessage("");
+//   };
+
+//   const sendBroadcastMessage = async () => {
+//     if (!message.trim()) return;
+
+//     const targets = connectedDevicesRef.current;
+
+//     if (targets.length === 0) {
+//       Alert.alert("No Relay Devices", "Pehle ek ya zyada devices connect karo.");
+//       return;
+//     }
+
+//     const packet = {
+//       id: `broadcast-${Date.now()}-${Math.random()}`,
+//       type: "BROADCAST",
+//       from: "Me",
+//       text: message.trim(),
+//       relay: true,
+//       time: Date.now(),
+//     };
+
+//     seenMessagesRef.current.add(packet.id);
+
+//     let successCount = 0;
+
+//     for (const device of targets) {
+//       const ok = await sendToDevice(device, packet);
+//       if (ok) successCount++;
+//     }
+
+//     setChat(prev => [
+//       ...prev,
+//       {
+//         id: packet.id,
+//         text: `[BROADCAST ${successCount}/${targets.length}] ${packet.text}`,
+//         type: "sent",
+//       },
+//     ]);
+
+//     setMessage("");
+//   };
+
+//   const sendSOSMessage = async () => {
+//     const targets = connectedDevicesRef.current;
+
+//     if (targets.length === 0) {
+//       Alert.alert("No Device", "Pehle Bluetooth device connect karo.");
+//       return;
+//     }
+
+//     try {
+//       const location = await GetLocation.getCurrentPosition({
+//         enableHighAccuracy: false,
+//         timeout: 10000,
+//       });
+
+//       const sosText = `🚨 SOS ALERT | Help needed | Lat:${location.latitude} | Lng:${location.longitude}`;
+
+//       const packet = {
+//         id: `sos-${Date.now()}-${Math.random()}`,
+//         type: "SOS",
+//         from: "Me",
+//         text: sosText,
+//         relay: true,
+//         time: Date.now(),
+//       };
+
+//       seenMessagesRef.current.add(packet.id);
+
+//       let successCount = 0;
+
+//       for (const device of targets) {
+//         const ok = await sendToDevice(device, packet);
+//         if (ok) successCount++;
+//       }
+
+//       setChat(prev => [
+//         ...prev,
+//         {
+//           id: packet.id,
+//           text: `[SOS ${successCount}/${targets.length}] ${sosText}`,
+//           type: "sent",
+//         },
+//       ]);
+
+//       Alert.alert("SOS Sent", `SOS ${successCount}/${targets.length} devices par send hua.`);
+//     } catch (error) {
+//       Alert.alert("Location Error", "GPS ON karo aur location permission allow karo.");
+//     }
+//   };
+
+//   const renderDevice = ({ item }) => {
+//     const isConnected = connectedDevices.some(d => d.address === item.address);
+//     const isSelected = selectedDevice?.address === item.address;
+
+//     return (
+//       <View style={[styles.deviceCard, isSelected && styles.selectedCard]}>
+//         <View style={styles.deviceIconBox}>
+//           <Text style={styles.deviceIcon}>⌁</Text>
+//         </View>
+
+//         <TouchableOpacity
+//           style={styles.deviceInfo}
+//           onPress={() => {
+//             if (isConnected) setSelectedDevice(item);
+//           }}
+//         >
+//           <Text style={styles.name}>{item.name || "Unknown Device"}</Text>
+//           <Text style={styles.address}>{item.address || "No Address"}</Text>
+//           <Text style={isConnected ? styles.online : styles.offline}>
+//             {isConnected ? "● Connected / Relay Ready" : "● Not Connected"}
+//           </Text>
+//         </TouchableOpacity>
+
+//         <TouchableOpacity
+//           style={[styles.connectBtn, isConnected && styles.connectedBtn]}
+//           onPress={() => connectDevice(item)}
+//           disabled={isConnected}
+//         >
+//           <Text style={styles.connectBtnText}>
+//             {isConnected ? "Linked" : "Link"}
+//           </Text>
+//         </TouchableOpacity>
+//       </View>
+//     );
+//   };
+
+//   const renderConnectedDevice = ({ item }) => {
+//     const isSelected = selectedDevice?.address === item.address;
+
+//     return (
+//       <TouchableOpacity
+//         style={[styles.connectedChip, isSelected && styles.activeChip]}
+//         onPress={() => setSelectedDevice(item)}
+//       >
+//         <Text style={styles.chipDot}>●</Text>
+//         <Text style={styles.chipText}>{item.name || "Device"}</Text>
+//       </TouchableOpacity>
+//     );
+//   };
+
+//   return (
+//     <SafeAreaView   style={[
+//     styles.container,
+//     { backgroundColor: colors.bg }
+//   ]}
+// >
+//       <View style={styles.glowOne} />
+//       <View style={styles.glowTwo} />
+
+//       <View style={styles.headerCard}>
+//         <View>
+//           <Text style={styles.appLabel}>OFFLINE BLUETOOTH MESH</Text>
+//           <Text style={styles.title}>Mesh Relay</Text>
+//           <Text style={styles.subtitle}>Secure device-to-device communication</Text>
+//         </View>
+
+//         <View style={styles.nodeBox}>
+//           <Text style={styles.nodeCount}>{connectedDevices.length}</Text>
+//           <Text style={styles.nodeText}>Nodes</Text>
+//         </View>
+//       </View>
+
+//       <View style={styles.actionPanel}>
+//         <TouchableOpacity
+//           style={[styles.actionBtn, styles.receiveBtn, receiving && styles.stopBtn]}
+//           onPress={receiving ? stopReceiveMode : startReceiveMode}
+//         >
+//           <Text style={styles.actionIcon}>{receiving ? "■" : "◉"}</Text>
+//           <Text style={styles.actionText}>
+//             {receiving ? "Stop Receive" : "Receive Mode"}
+//           </Text>
+//         </TouchableOpacity>
+
+//         <TouchableOpacity
+//           style={[styles.actionBtn, styles.scanBtn, scanning && styles.disabledBtn]}
+//           onPress={startScan}
+//           disabled={scanning}
+//         >
+//           <Text style={styles.actionIcon}>⌕</Text>
+//           <Text style={styles.actionText}>
+//             {scanning ? "Scanning..." : "Scan New"}
+//           </Text>
+//         </TouchableOpacity>
+//       </View>
+
+//       <View style={styles.sectionHeader}>
+//         <Text style={styles.sectionTitle}>Active Relay Nodes</Text>
+//         <Text style={styles.sectionMeta}>{connectedDevices.length} online</Text>
+//       </View>
+
+//       <FlatList
+//         data={connectedDevices}
+//         horizontal
+//         keyExtractor={(item, index) => item.address || String(index)}
+//         renderItem={renderConnectedDevice}
+//         showsHorizontalScrollIndicator={false}
+//         style={styles.chipList}
+//         ListEmptyComponent={<Text style={styles.emptySmall}>No active relay device</Text>}
+//       />
+
+//       <View style={styles.sectionHeader}>
+//         <Text style={styles.sectionTitle}>Available Devices</Text>
+//         <Text style={styles.sectionMeta}>Bluetooth scan</Text>
+//       </View>
+
+//       <FlatList
+//         data={devices}
+//         keyExtractor={(item, index) => item.address || String(index)}
+//         renderItem={renderDevice}
+//         style={styles.deviceList}
+//         showsVerticalScrollIndicator={false}
+//         ListEmptyComponent={
+//           <View style={styles.emptyCard}>
+//             <Text style={styles.emptyIcon}>⌁</Text>
+//             <Text style={styles.empty}>Scan karo, devices yaha show honge.</Text>
+//           </View>
+//         }
+//       />
+
+//       <TouchableOpacity style={styles.sosBtn} onPress={sendSOSMessage}>
+//         <Text style={styles.sosText}>🚨 SOS Broadcast Location</Text>
+//       </TouchableOpacity>
+
+//       <View style={styles.chatBox}>
+//         <View style={styles.chatHeader}>
+//           <View>
+//             <Text style={styles.chatTitle}>Secure Chat</Text>
+//             <Text style={styles.connectedText}>
+//               {selectedDevice
+//                 ? `Selected: ${selectedDevice.name || "Device"}`
+//                 : "No selected device"}
+//             </Text>
+//           </View>
+
+//           <View style={styles.chatBadge}>
+//             <Text style={styles.chatBadgeText}>{chat.length}</Text>
+//           </View>
+//         </View>
+
+//         <FlatList
+//           data={chat}
+//           keyExtractor={item => item.id}
+//           showsVerticalScrollIndicator={false}
+//           renderItem={({ item }) => (
+//             <View
+//               style={[
+//                 styles.messageBubble,
+//                 item.type === "received" && styles.receivedBubble,
+//               ]}
+//             >
+//               <Text
+//                 style={[
+//                   styles.messageText,
+//                   item.type === "received" && styles.receivedText,
+//                 ]}
+//               >
+//                 {item.text}
+//               </Text>
+//             </View>
+//           )}
+//           ListEmptyComponent={<Text style={styles.emptyChat}>No messages yet</Text>}
+//         />
+
+//         <View style={styles.inputRow}>
+//           <TextInput
+//             style={styles.input}
+//             placeholder="Type message..."
+//             placeholderTextColor="#64748B"
+//             value={message}
+//             onChangeText={setMessage}
+//           />
+
+//           <TouchableOpacity style={styles.sendBtn} onPress={sendSingleMessage}>
+//             <Text style={styles.sendText}>Send</Text>
+//           </TouchableOpacity>
+
+//           <TouchableOpacity style={styles.broadcastBtn} onPress={sendBroadcastMessage}>
+//             <Text style={styles.broadcastText}>All</Text>
+//           </TouchableOpacity>
+//         </View>
+//       </View>
+
+//      <View style={styles.bottomNavWrapper}>
+//   <View style={styles.bottomNav}>
+//     <TouchableOpacity style={styles.navItem}>
+//       <Text style={[styles.navIcon, styles.activeNavIcon]}>⌂</Text>
+//       <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
+//     </TouchableOpacity>
+
+//     <TouchableOpacity style={styles.navItem}>
+//       <Text style={styles.navIcon}>🗺</Text>
+//       <Text style={styles.navText}>Map</Text>
+//     </TouchableOpacity>
+
+//     <TouchableOpacity style={styles.navItem}>
+//       <Text style={styles.navIcon}>◎</Text>
+//       <Text style={styles.navText}>Nodes</Text>
+//     </TouchableOpacity>
+
+//     <TouchableOpacity style={styles.navItem} onPress={() => navigation.navigate("Settings")}>
+//       <Text style={styles.navIcon}>⚙</Text>
+//       <Text style={styles.navText} 
+//       >Settings</Text>
+//     </TouchableOpacity>
+//   </View>
+// </View>
+//     </SafeAreaView>
+//   );
+// }
+
+// const shadow3D = {
+//   elevation: 14,
+//   shadowColor: "#000",
+//   shadowOpacity: 0.45,
+//   shadowRadius: 18,
+//   shadowOffset: { width: 0, height: 10 },
+// };
+
+// const neonShadow = {
+//   elevation: 16,
+//   shadowColor: "#00F5FF",
+//   shadowOpacity: 0.28,
+//   shadowRadius: 20,
+//   shadowOffset: { width: 0, height: 10 },
+// };
+
+// const styles = StyleSheet.create({
+//   container: {
+//     flex: 1,
+//     backgroundColor: "#020617",
+//     paddingHorizontal: 18,
+//     paddingTop: 18,
+//     paddingBottom: 95,
+//     overflow: "hidden",
+//   },
+
+//   glowOne: {
+//     position: "absolute",
+//     width: 260,
+//     height: 260,
+//     borderRadius: 130,
+//     backgroundColor: "#0EA5E9",
+//     opacity: 0.12,
+//     top: -90,
+//     right: -80,
+//   },
+
+//   glowTwo: {
+//     position: "absolute",
+//     width: 220,
+//     height: 220,
+//     borderRadius: 110,
+//     backgroundColor: "#22C55E",
+//     opacity: 0.1,
+//     bottom: 150,
+//     left: -100,
+//   },
+
+//   headerCard: {
+//     backgroundColor: "#0F172A",
+//     borderRadius: 30,
+//     padding: 20,
+//     marginBottom: 16,
+//     borderWidth: 1,
+//     borderColor: "#1E293B",
+//     flexDirection: "row",
+//     alignItems: "center",
+//     justifyContent: "space-between",
+//     ...neonShadow,
+//   },
+
+//   appLabel: {
+//     color: "#38BDF8",
+//     fontSize: 11,
+//     fontWeight: "900",
+//     letterSpacing: 1.5,
+//     marginBottom: 8,
+//   },
+
+//   title: {
+//     color: "#F8FAFC",
+//     fontSize: 31,
+//     fontWeight: "900",
+//   },
+
+//   subtitle: {
+//     color: "#94A3B8",
+//     fontSize: 12,
+//     fontWeight: "700",
+//     marginTop: 5,
+//   },
+
+//   nodeBox: {
+//     width: 74,
+//     height: 74,
+//     borderRadius: 24,
+//     backgroundColor: "#042F2E",
+//     borderWidth: 1,
+//     borderColor: "#2DD4BF",
+//     alignItems: "center",
+//     justifyContent: "center",
+//   },
+
+//   nodeCount: {
+//     color: "#5EEAD4",
+//     fontSize: 25,
+//     fontWeight: "900",
+//   },
+
+//   nodeText: {
+//     color: "#CCFBF1",
+//     fontSize: 11,
+//     fontWeight: "900",
+//   },
+
+//   actionPanel: {
+//     flexDirection: "row",
+//     gap: 12,
+//     marginBottom: 16,
+//   },
+
+//   actionBtn: {
+//     flex: 1,
+//     paddingVertical: 15,
+//     borderRadius: 24,
+//     alignItems: "center",
+//     justifyContent: "center",
+//     borderWidth: 1,
+//     flexDirection: "row",
+//     gap: 7,
+//     ...shadow3D,
+//   },
+
+//   receiveBtn: {
+//     backgroundColor: "#064E3B",
+//     borderColor: "#10B981",
+//   },
+
+//   stopBtn: {
+//     backgroundColor: "#7F1D1D",
+//     borderColor: "#FB7185",
+//   },
+
+//   scanBtn: {
+//     backgroundColor: "#082F49",
+//     borderColor: "#38BDF8",
+//   },
+
+//   actionIcon: {
+//     color: "#FFFFFF",
+//     fontSize: 15,
+//     fontWeight: "900",
+//   },
+
+//   actionText: {
+//     color: "#F8FAFC",
+//     fontSize: 13,
+//     fontWeight: "900",
+//   },
+
+//   disabledBtn: {
+//     opacity: 0.55,
+//   },
+
+//   sectionHeader: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     justifyContent: "space-between",
+//     marginBottom: 8,
+//   },
+
+//   sectionTitle: {
+//     color: "#E5E7EB",
+//     fontSize: 14,
+//     fontWeight: "900",
+//   },
+
+//   sectionMeta: {
+//     color: "#64748B",
+//     fontSize: 11,
+//     fontWeight: "800",
+//   },
+
+//   chipList: {
+//     maxHeight: 48,
+//     marginBottom: 8,
+//   },
+
+//   connectedChip: {
+//     backgroundColor: "#111827",
+//     borderColor: "#334155",
+//     borderWidth: 1,
+//     paddingHorizontal: 13,
+//     paddingVertical: 9,
+//     borderRadius: 999,
+//     marginRight: 9,
+//     flexDirection: "row",
+//     alignItems: "center",
+//     gap: 6,
+//   },
+
+//   activeChip: {
+//     backgroundColor: "#052E2B",
+//     borderColor: "#5EEAD4",
+//   },
+
+//   chipDot: {
+//     color: "#22C55E",
+//     fontSize: 10,
+//   },
+
+//   chipText: {
+//     color: "#F8FAFC",
+//     fontWeight: "900",
+//     fontSize: 12,
+//   },
+
+//   deviceList: {
+//     maxHeight: 205,
+//     marginBottom: 8,
+//   },
+
+//   deviceCard: {
+//     backgroundColor: "#0F172A",
+//     borderRadius: 24,
+//     padding: 14,
+//     marginBottom: 12,
+//     flexDirection: "row",
+//     alignItems: "center",
+//     borderWidth: 1,
+//     borderColor: "#1E293B",
+//     ...shadow3D,
+//   },
+
+//   selectedCard: {
+//     borderColor: "#5EEAD4",
+//     backgroundColor: "#10231F",
+//   },
+
+//   deviceIconBox: {
+//     width: 46,
+//     height: 46,
+//     borderRadius: 17,
+//     backgroundColor: "#020617",
+//     borderWidth: 1,
+//     borderColor: "#334155",
+//     alignItems: "center",
+//     justifyContent: "center",
+//     marginRight: 12,
+//   },
+
+//   deviceIcon: {
+//     color: "#38BDF8",
+//     fontSize: 24,
+//     fontWeight: "900",
+//   },
+
+//   deviceInfo: {
+//     flex: 1,
+//   },
+
+//   name: {
+//     color: "#F8FAFC",
+//     fontSize: 15,
+//     fontWeight: "900",
+//   },
+
+//   address: {
+//     color: "#94A3B8",
+//     fontSize: 11,
+//     marginTop: 4,
+//     fontWeight: "700",
+//   },
+
+//   online: {
+//     color: "#5EEAD4",
+//     fontWeight: "900",
+//     marginTop: 6,
+//     fontSize: 12,
+//   },
+
+//   offline: {
+//     color: "#FBBF24",
+//     fontWeight: "900",
+//     marginTop: 6,
+//     fontSize: 12,
+//   },
+
+//   connectBtn: {
+//     backgroundColor: "#042F2E",
+//     borderWidth: 1,
+//     borderColor: "#2DD4BF",
+//     paddingVertical: 10,
+//     paddingHorizontal: 15,
+//     borderRadius: 999,
+//   },
+
+//   connectedBtn: {
+//     opacity: 0.65,
+//   },
+
+//   connectBtnText: {
+//     color: "#5EEAD4",
+//     fontWeight: "900",
+//     fontSize: 12,
+//   },
+
+//   emptyCard: {
+//     backgroundColor: "#0F172A",
+//     borderRadius: 24,
+//     padding: 22,
+//     borderWidth: 1,
+//     borderColor: "#1E293B",
+//     alignItems: "center",
+//   },
+
+//   emptyIcon: {
+//     color: "#334155",
+//     fontSize: 30,
+//     marginBottom: 6,
+//   },
+
+//   empty: {
+//     color: "#64748B",
+//     textAlign: "center",
+//     fontWeight: "800",
+//   },
+
+//   emptySmall: {
+//     color: "#64748B",
+//     fontWeight: "800",
+//     marginBottom: 10,
+//   },
+
+//   sosBtn: {
+//     backgroundColor: "#881337",
+//     paddingVertical: 15,
+//     borderRadius: 25,
+//     alignItems: "center",
+//     marginBottom: 12,
+//     borderWidth: 1,
+//     borderColor: "#FB7185",
+//     ...shadow3D,
+//   },
+
+//   sosText: {
+//     color: "#FFFFFF",
+//     fontWeight: "900",
+//     fontSize: 15,
+//   },
+
+//   chatBox: {
+//     backgroundColor: "#0F172A",
+//     borderRadius: 30,
+//     padding: 14,
+//     flex: 1,
+//     borderWidth: 1,
+//     borderColor: "#1E293B",
+//     ...shadow3D,
+//   },
+
+//   chatHeader: {
+//     flexDirection: "row",
+//     justifyContent: "space-between",
+//     alignItems: "center",
+//     marginBottom: 12,
+//   },
+
+//   chatTitle: {
+//     color: "#F8FAFC",
+//     fontSize: 16,
+//     fontWeight: "900",
+//   },
+
+//   connectedText: {
+//     color: "#5EEAD4",
+//     fontWeight: "800",
+//     fontSize: 12,
+//     marginTop: 3,
+//   },
+
+//   chatBadge: {
+//     width: 34,
+//     height: 34,
+//     borderRadius: 14,
+//     backgroundColor: "#020617",
+//     borderWidth: 1,
+//     borderColor: "#334155",
+//     alignItems: "center",
+//     justifyContent: "center",
+//   },
+
+//   chatBadgeText: {
+//     color: "#38BDF8",
+//     fontWeight: "900",
+//   },
+
+//   messageBubble: {
+//     alignSelf: "flex-end",
+//     backgroundColor: "#5EEAD4",
+//     paddingVertical: 10,
+//     paddingHorizontal: 12,
+//     borderRadius: 18,
+//     borderTopRightRadius: 6,
+//     marginBottom: 9,
+//     maxWidth: "82%",
+//   },
+
+//   receivedBubble: {
+//     alignSelf: "flex-start",
+//     backgroundColor: "#1E293B",
+//     borderTopLeftRadius: 6,
+//   },
+
+//   messageText: {
+//     color: "#022C22",
+//     fontWeight: "800",
+//     fontSize: 13,
+//   },
+
+//   receivedText: {
+//     color: "#F8FAFC",
+//   },
+
+//   emptyChat: {
+//     color: "#64748B",
+//     textAlign: "center",
+//     marginTop: 35,
+//     fontWeight: "800",
+//   },
+
+//   inputRow: {
+//     flexDirection: "row",
+//     alignItems: "center",
+//     marginTop: 12,
+//     gap: 8,
+//   },
+
+//   input: {
+//     flex: 1,
+//     backgroundColor: "#020617",
+//     color: "#F8FAFC",
+//     borderRadius: 999,
+//     paddingHorizontal: 16,
+//     paddingVertical: 12,
+//     borderWidth: 1,
+//     borderColor: "#334155",
+//     fontWeight: "700",
+//   },
+
+//   sendBtn: {
+//     backgroundColor: "#5EEAD4",
+//     paddingHorizontal: 16,
+//     paddingVertical: 12,
+//     borderRadius: 999,
+//   },
+
+//   sendText: {
+//     color: "#022C22",
+//     fontWeight: "900",
+//   },
+
+//   broadcastBtn: {
+//     backgroundColor: "#2563EB",
+//     paddingHorizontal: 16,
+//     paddingVertical: 12,
+//     borderRadius: 999,
+//   },
+
+//   broadcastText: {
+//     color: "#FFFFFF",
+//     fontWeight: "900",
+//   },
+
+//   bottomNavWrapper: {
+//     position: "absolute",
+//     bottom: 15,
+//     left: 18,
+//     right: 18,
+//   },
+
+//   bottomNav: {
+//     height: 68,
+//     backgroundColor: "rgba(7, 18, 37, 0.98)",
+//     borderRadius: 24,
+//     borderWidth: 1,
+//     borderColor: "rgba(56,189,248,0.18)",
+//     flexDirection: "row",
+//     alignItems: "center",
+//     justifyContent: "space-around",
+//     paddingHorizontal: 8,
+//     elevation: 24,
+//     shadowColor: "#000",
+//     shadowOpacity: 0.55,
+//     shadowRadius: 20,
+//     shadowOffset: { width: 0, height: 12 },
+//   },
+
+//   navItem: {
+//     alignItems: "center",
+//     justifyContent: "center",
+//     minWidth: 60,
+//   },
+
+//   activeIconBox: {
+//     width: 34,
+//     height: 34,
+//     borderRadius: 14,
+//     backgroundColor: "rgba(0,245,195,0.12)",
+//     alignItems: "center",
+//     justifyContent: "center",
+//     borderWidth: 1,
+//     borderColor: "rgba(0,245,195,0.35)",
+//   },
+
+//   navText: {
+//     color: "#94A3B8",
+//     fontSize: 10,
+//     marginTop: 3,
+//     fontWeight: "800",
+//   },
+
+//   activeNavText: {
+//     color: "#00F5C3",
+//   },
+//   navIcon: {
+//   color: "#94A3B8",
+//   fontSize: 22,
+//   fontWeight: "900",
+// },
+
+// activeNavIcon: {
+//   color: "#00F5C3",
+// },
+// });
+

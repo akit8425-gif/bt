@@ -6,6 +6,10 @@ import WelcomeScreen from "../screens/WelcomeScreen";
 import BluetoothScreen from "../screens/BluetoothScreen";
 import ChatScreen from "../screens/ChatScreen";
 import LocationScreen from "../screens/LocationScreen";
+ 
+import SettingsScreen from "../screens/SettingsScreen";
+import AboutScreen from './../screens/AboutScreen';
+import MapScreen from './../screens/MapScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -50,6 +54,23 @@ export default function AppNavigator() {
         name="Location"
         component={LocationScreen}
       />
+
+
+      
+
+
+      {/* Settings */}
+      <Stack.Screen name="Settings" component={SettingsScreen} />
+
+
+{/* About Us */}
+        <Stack.Screen
+        name="About"
+        component={AboutScreen}
+      />
+
+      {/* Mapscreen */}
+        <Stack.Screen name="Map" component={MapScreen} />
     </Stack.Navigator>
   );
 }
